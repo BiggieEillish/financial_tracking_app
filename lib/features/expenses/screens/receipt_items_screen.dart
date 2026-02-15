@@ -1,9 +1,14 @@
 import 'package:flutter/material.dart';
+import 'package:flutter_bloc/flutter_bloc.dart';
 import 'package:go_router/go_router.dart';
 import '../../../core/services/ocr_service.dart';
-import '../../../core/services/pdf_service.dart';
-import '../../../core/database/database_service.dart';
+import '../../../core/services/category_classifier_service.dart';
 import '../../../shared/constants/app_constants.dart';
+import '../bloc/expense_form_cubit.dart';
+import '../bloc/expense_form_state.dart';
+import '../bloc/expense_list_cubit.dart';
+import '../../dashboard/bloc/dashboard_cubit.dart';
+import '../widgets/manual_item_entry_dialog.dart';
 
 class ReceiptItemsScreen extends StatefulWidget {
   final ReceiptScanResult scanResult;
@@ -18,16 +23,66 @@ class ReceiptItemsScreen extends StatefulWidget {
 }
 
 class _ReceiptItemsScreenState extends State<ReceiptItemsScreen> {
-  final DatabaseService _databaseService = DatabaseService();
-  final PDFService _pdfService = PDFService();
   final List<ReceiptItem> _items = [];
-  bool _isSaving = false;
-  String? _errorMessage;
+  late DateTime _selectedDate;
 
   @override
   void initState() {
     super.initState();
+    _selectedDate = widget.scanResult.date ?? DateTime.now();
     _items.addAll(widget.scanResult.items);
+    _autoCategorizeItems();
+  }
+
+  Future<void> _pickDate() async {
+    final now = DateTime.now();
+    final firstDate = DateTime(2015);
+    final initial = _selectedDate.isBefore(firstDate)
+        ? firstDate
+        : (_selectedDate.isAfter(now) ? now : _selectedDate);
+    final picked = await showDatePicker(
+      context: context,
+      initialDate: initial,
+      firstDate: firstDate,
+      lastDate: now,
+    );
+    if (picked != null) {
+      setState(() {
+        _selectedDate = picked;
+      });
+    }
+  }
+
+  String _formatDisplayDate(DateTime date) {
+    final now = DateTime.now();
+    final today = DateTime(now.year, now.month, now.day);
+    final selected = DateTime(date.year, date.month, date.day);
+
+    if (selected == today) return 'Today';
+    if (selected == today.subtract(const Duration(days: 1))) {
+      return 'Yesterday';
+    }
+    return '${date.day}/${date.month}/${date.year}';
+  }
+
+  void _autoCategorizeItems() {
+    final classifier =
+        context.read<CategoryClassifierService>();
+    if (!classifier.isModelReady) return;
+
+    for (int i = 0; i < _items.length; i++) {
+      if (_items[i].category == null) {
+        final predictions = classifier.predict(_items[i].name, topN: 1);
+        if (predictions.isNotEmpty && predictions.first.confidence > 0.15) {
+          _items[i] = ReceiptItem(
+            name: _items[i].name,
+            price: _items[i].price,
+            quantity: _items[i].quantity,
+            category: predictions.first.category,
+          );
+        }
+      }
+    }
   }
 
   Future<void> _saveAllItems() async {
@@ -38,40 +93,40 @@ class _ReceiptItemsScreenState extends State<ReceiptItemsScreen> {
       return;
     }
 
-    setState(() {
-      _isSaving = true;
-      _errorMessage = null;
-    });
+    final receiptData = _items
+        .map((item) => ReceiptExpenseData(
+              amount: item.price * item.quantity,
+              category: item.category ?? 'Other',
+              description: '${item.name} (${item.quantity}x)',
+            ))
+        .toList();
 
-    try {
-      const userId = 'default_user'; // In a real app, get from auth
-
-      for (final item in _items) {
-        await _databaseService.addExpense(
-          userId: userId,
-          amount: item.price * item.quantity,
-          category: item.category ?? 'Other',
-          description: '${item.name} (${item.quantity}x)',
-          date: widget.scanResult.date ?? DateTime.now(),
+    await context.read<ExpenseFormCubit>().addExpensesFromReceipt(
+          items: receiptData,
+          date: _selectedDate,
           receiptImage: widget.scanResult.receiptImagePath,
+          storeName: widget.scanResult.storeName,
         );
-      }
+  }
 
-      if (mounted) {
-        ScaffoldMessenger.of(context).showSnackBar(
-          SnackBar(
-            content: Text('Successfully saved ${_items.length} items'),
-            backgroundColor: AppConstants.successColor,
-          ),
-        );
-        context.go('/');
-      }
-    } catch (e) {
-      setState(() {
-        _errorMessage = 'Error saving items: $e';
-        _isSaving = false;
-      });
-    }
+  void _updateItemName(int index, String name) {
+    _items[index] = ReceiptItem(
+      name: name,
+      price: _items[index].price,
+      quantity: _items[index].quantity,
+      category: _items[index].category,
+    );
+  }
+
+  void _updateItemPrice(int index, double price) {
+    setState(() {
+      _items[index] = ReceiptItem(
+        name: _items[index].name,
+        price: price,
+        quantity: _items[index].quantity,
+        category: _items[index].category,
+      );
+    });
   }
 
   void _updateItemCategory(int index, String category) {
@@ -104,38 +159,77 @@ class _ReceiptItemsScreenState extends State<ReceiptItemsScreen> {
     });
   }
 
+  void _showManualItemEntry() {
+    showDialog(
+      context: context,
+      builder: (dialogContext) => ManualItemEntryDialog(
+        onAdd: (item) {
+          setState(() {
+            _items.add(item);
+          });
+        },
+      ),
+    );
+  }
+
   @override
   Widget build(BuildContext context) {
-    return Scaffold(
-      appBar: AppBar(
-        title: const Text('Receipt Items'),
-        leading: IconButton(
-          icon: const Icon(Icons.close),
-          onPressed: () => context.go('/'),
-        ),
-        actions: [
-          if (_items.isNotEmpty)
-            TextButton(
-              onPressed: _isSaving ? null : _saveAllItems,
-              child: _isSaving
-                  ? const SizedBox(
-                      width: 16,
-                      height: 16,
-                      child: CircularProgressIndicator(strokeWidth: 2),
-                    )
-                  : const Text('Save All'),
+    return BlocListener<ExpenseFormCubit, ExpenseFormState>(
+      listener: (context, state) {
+        if (state is ExpenseFormSuccess) {
+          context.read<ExpenseListCubit>().loadExpenses();
+          context.read<DashboardCubit>().loadDashboard();
+          ScaffoldMessenger.of(context).showSnackBar(
+            SnackBar(
+              content: Text('Successfully saved ${_items.length} items'),
+              backgroundColor: AppConstants.successColor,
             ),
-        ],
+          );
+          context.go('/');
+        } else if (state is ExpenseFormError) {
+          ScaffoldMessenger.of(context).showSnackBar(
+            SnackBar(content: Text(state.message)),
+          );
+        }
+      },
+      child: Scaffold(
+        appBar: AppBar(
+          title: const Text('Receipt Items'),
+          leading: IconButton(
+            icon: const Icon(Icons.close_rounded),
+            onPressed: () => context.go('/'),
+          ),
+          actions: [
+            if (_items.isNotEmpty)
+              BlocBuilder<ExpenseFormCubit, ExpenseFormState>(
+                builder: (context, state) {
+                  return TextButton(
+                    onPressed:
+                        state is ExpenseFormSubmitting ? null : _saveAllItems,
+                    child: state is ExpenseFormSubmitting
+                        ? const SizedBox(
+                            width: 16,
+                            height: 16,
+                            child:
+                                CircularProgressIndicator(strokeWidth: 2),
+                          )
+                        : const Text('Save All'),
+                  );
+                },
+              ),
+          ],
+        ),
+        body: _buildBody(),
+        floatingActionButton: FloatingActionButton(
+          onPressed: _showManualItemEntry,
+          tooltip: 'Add Item',
+          child: const Icon(Icons.add_rounded),
+        ),
       ),
-      body: _buildBody(),
     );
   }
 
   Widget _buildBody() {
-    if (_errorMessage != null) {
-      return _buildErrorView();
-    }
-
     if (_items.isEmpty) {
       return _buildEmptyView();
     }
@@ -143,72 +237,39 @@ class _ReceiptItemsScreenState extends State<ReceiptItemsScreen> {
     return Column(
       children: [
         _buildReceiptSummary(),
-        Expanded(
-          child: _buildItemsList(),
-        ),
+        Expanded(child: _buildItemsList()),
       ],
-    );
-  }
-
-  Widget _buildErrorView() {
-    return Center(
-      child: Padding(
-        padding: const EdgeInsets.all(16.0),
-        child: Column(
-          mainAxisAlignment: MainAxisAlignment.center,
-          children: [
-            const Icon(
-              Icons.error_outline,
-              size: 64,
-              color: Colors.red,
-            ),
-            const SizedBox(height: 16),
-            Text(
-              _errorMessage!,
-              textAlign: TextAlign.center,
-              style: const TextStyle(fontSize: 16),
-            ),
-            const SizedBox(height: 24),
-            ElevatedButton(
-              onPressed: () {
-                setState(() {
-                  _errorMessage = null;
-                });
-              },
-              child: const Text('Try Again'),
-            ),
-          ],
-        ),
-      ),
     );
   }
 
   Widget _buildEmptyView() {
     return Center(
-      child: Column(
-        mainAxisAlignment: MainAxisAlignment.center,
-        children: [
-          const Icon(
-            Icons.receipt_long,
-            size: 64,
-            color: Colors.grey,
-          ),
-          const SizedBox(height: 16),
-          const Text(
-            'No items found',
-            style: TextStyle(fontSize: 18, fontWeight: FontWeight.w500),
-          ),
-          const SizedBox(height: 8),
-          const Text(
-            'The receipt scan didn\'t detect any items',
-            style: TextStyle(fontSize: 14, color: Colors.grey),
-          ),
-          const SizedBox(height: 24),
-          ElevatedButton(
-            onPressed: () => context.go('/'),
-            child: const Text('Go Back'),
-          ),
-        ],
+      child: Padding(
+        padding: const EdgeInsets.all(AppSpacing.xl),
+        child: Column(
+          mainAxisAlignment: MainAxisAlignment.center,
+          children: [
+            Icon(Icons.receipt_long_rounded,
+                size: 48, color: AppConstants.textTertiary),
+            const SizedBox(height: AppSpacing.md),
+            Text(
+              'No items found',
+              style: AppTextStyles.headline3.copyWith(
+                color: AppConstants.textSecondary,
+              ),
+            ),
+            const SizedBox(height: AppSpacing.sm),
+            Text(
+              'The receipt scan didn\'t detect any items',
+              style: AppTextStyles.bodyText2,
+            ),
+            const SizedBox(height: AppSpacing.lg),
+            ElevatedButton(
+              onPressed: () => context.go('/'),
+              child: const Text('Go Back'),
+            ),
+          ],
+        ),
       ),
     );
   }
@@ -219,12 +280,11 @@ class _ReceiptItemsScreenState extends State<ReceiptItemsScreen> {
             false;
 
     return Container(
-      padding: const EdgeInsets.all(16),
+      padding: const EdgeInsets.all(AppSpacing.md),
       decoration: BoxDecoration(
-        color: Colors.grey[50],
+        color: AppConstants.surfaceColor,
         border: Border(
-          bottom: BorderSide(color: Colors.grey[300]!),
-        ),
+            bottom: BorderSide(color: AppConstants.borderColor)),
       ),
       child: Column(
         crossAxisAlignment: CrossAxisAlignment.start,
@@ -232,59 +292,74 @@ class _ReceiptItemsScreenState extends State<ReceiptItemsScreen> {
           Row(
             children: [
               if (isPDF) ...[
-                const Icon(Icons.picture_as_pdf, color: Colors.red, size: 20),
-                const SizedBox(width: 8),
-                const Text(
+                Icon(Icons.picture_as_pdf_rounded,
+                    color: AppConstants.errorColor, size: 20),
+                const SizedBox(width: AppSpacing.sm),
+                Text(
                   'PDF Receipt',
-                  style: TextStyle(
-                    fontSize: 12,
-                    color: Colors.red,
-                    fontWeight: FontWeight.w500,
+                  style: AppTextStyles.caption.copyWith(
+                    color: AppConstants.errorColor,
+                    fontWeight: FontWeight.w600,
                   ),
                 ),
-                const SizedBox(width: 16),
+                const SizedBox(width: AppSpacing.md),
               ],
               Expanded(
                 child: Text(
                   widget.scanResult.storeName ?? 'Receipt',
-                  style: const TextStyle(
-                    fontSize: 18,
-                    fontWeight: FontWeight.bold,
-                  ),
+                  style: AppTextStyles.headline3,
                 ),
               ),
             ],
           ),
-          const SizedBox(height: 8),
+          const SizedBox(height: AppSpacing.sm),
           Row(
             mainAxisAlignment: MainAxisAlignment.spaceBetween,
             children: [
               Text(
                 'Total: ${AppConstants.currencySymbol}${widget.scanResult.totalAmount.toStringAsFixed(2)}',
-                style: const TextStyle(
-                  fontSize: 16,
+                style: AppTextStyles.bodyText1.copyWith(
                   fontWeight: FontWeight.w600,
                 ),
               ),
               Text(
                 '${_items.length} items',
-                style: const TextStyle(
-                  fontSize: 14,
-                  color: Colors.grey,
-                ),
+                style: AppTextStyles.caption,
               ),
             ],
           ),
-          if (widget.scanResult.date != null) ...[
-            const SizedBox(height: 4),
-            Text(
-              'Date: ${_formatDate(widget.scanResult.date!)}',
-              style: const TextStyle(
-                fontSize: 12,
-                color: Colors.grey,
+          const SizedBox(height: AppSpacing.sm),
+          InkWell(
+            onTap: _pickDate,
+            borderRadius: BorderRadius.circular(8),
+            child: Container(
+              padding: const EdgeInsets.symmetric(
+                horizontal: AppSpacing.sm,
+                vertical: AppSpacing.xs,
+              ),
+              decoration: BoxDecoration(
+                border: Border.all(color: AppConstants.borderColor),
+                borderRadius: BorderRadius.circular(8),
+              ),
+              child: Row(
+                mainAxisSize: MainAxisSize.min,
+                children: [
+                  Icon(Icons.calendar_today_rounded,
+                      size: 14, color: AppConstants.textTertiary),
+                  const SizedBox(width: AppSpacing.xs),
+                  Text(
+                    _formatDisplayDate(_selectedDate),
+                    style: AppTextStyles.caption.copyWith(
+                      fontWeight: FontWeight.w600,
+                    ),
+                  ),
+                  const SizedBox(width: AppSpacing.xs),
+                  Icon(Icons.edit_rounded,
+                      size: 12, color: AppConstants.textTertiary),
+                ],
               ),
             ),
-          ],
+          ),
         ],
       ),
     );
@@ -292,65 +367,92 @@ class _ReceiptItemsScreenState extends State<ReceiptItemsScreen> {
 
   Widget _buildItemsList() {
     return ListView.builder(
-      padding: const EdgeInsets.all(16),
+      padding: const EdgeInsets.all(AppSpacing.md),
       itemCount: _items.length,
       itemBuilder: (context, index) {
         final item = _items[index];
         return Card(
-          margin: const EdgeInsets.only(bottom: 12),
+          margin: const EdgeInsets.only(bottom: AppSpacing.sm),
           child: Padding(
-            padding: const EdgeInsets.all(16),
+            padding: const EdgeInsets.all(AppSpacing.md),
             child: Column(
               crossAxisAlignment: CrossAxisAlignment.start,
               children: [
+                // Name + delete button
                 Row(
                   children: [
                     Expanded(
-                      child: Text(
-                        item.name,
-                        style: const TextStyle(
-                          fontSize: 16,
-                          fontWeight: FontWeight.w500,
+                      child: TextFormField(
+                        initialValue: item.name,
+                        style: AppTextStyles.bodyText1.copyWith(
+                          fontWeight: FontWeight.w600,
                         ),
+                        decoration: const InputDecoration(
+                          isDense: true,
+                          contentPadding: EdgeInsets.symmetric(
+                            horizontal: 8,
+                            vertical: 8,
+                          ),
+                          border: InputBorder.none,
+                          hintText: 'Item name',
+                        ),
+                        onChanged: (value) => _updateItemName(index, value),
                       ),
                     ),
                     IconButton(
-                      icon: const Icon(Icons.delete, color: Colors.red),
+                      icon: Icon(Icons.delete_rounded,
+                          color: AppConstants.errorColor, size: 20),
                       onPressed: () => _removeItem(index),
                       tooltip: 'Remove item',
+                      constraints: const BoxConstraints(),
+                      padding: const EdgeInsets.all(AppSpacing.xs),
                     ),
                   ],
                 ),
-                const SizedBox(height: 12),
+
+                // Category dropdown (full width)
+                _buildCategoryDropdown(index, item.category),
+                const SizedBox(height: AppSpacing.sm),
+
+                // Price + quantity + total row
                 Row(
                   children: [
                     Expanded(
-                      child: _buildCategoryDropdown(index, item.category),
+                      child: TextFormField(
+                        initialValue: item.price.toStringAsFixed(2),
+                        keyboardType: TextInputType.number,
+                        style: AppTextStyles.caption,
+                        decoration: InputDecoration(
+                          isDense: true,
+                          contentPadding: const EdgeInsets.symmetric(
+                            horizontal: 8,
+                            vertical: 8,
+                          ),
+                          border: InputBorder.none,
+                          prefixText: '${AppConstants.currencySymbol} ',
+                          prefixStyle: AppTextStyles.caption,
+                        ),
+                        onChanged: (value) {
+                          final price = double.tryParse(value);
+                          if (price != null) {
+                            _updateItemPrice(index, price);
+                          }
+                        },
+                      ),
                     ),
-                    const SizedBox(width: 16),
                     _buildQuantitySelector(index, item.quantity),
                   ],
                 ),
-                const SizedBox(height: 8),
-                Row(
-                  mainAxisAlignment: MainAxisAlignment.spaceBetween,
-                  children: [
-                    Text(
-                      'Price: ${AppConstants.currencySymbol}${item.price.toStringAsFixed(2)}',
-                      style: const TextStyle(
-                        fontSize: 14,
-                        color: Colors.grey,
-                      ),
+                const SizedBox(height: AppSpacing.sm),
+                Align(
+                  alignment: Alignment.centerRight,
+                  child: Text(
+                    'Total: ${AppConstants.currencySymbol}${(item.price * item.quantity).toStringAsFixed(2)}',
+                    style: AppTextStyles.bodyText1.copyWith(
+                      fontWeight: FontWeight.w700,
+                      color: AppConstants.primaryColor,
                     ),
-                    Text(
-                      'Total: ${AppConstants.currencySymbol}${(item.price * item.quantity).toStringAsFixed(2)}',
-                      style: const TextStyle(
-                        fontSize: 16,
-                        fontWeight: FontWeight.bold,
-                        color: AppConstants.primaryColor,
-                      ),
-                    ),
-                  ],
+                  ),
                 ),
               ],
             ),
@@ -365,21 +467,28 @@ class _ReceiptItemsScreenState extends State<ReceiptItemsScreen> {
       value: currentCategory ?? 'Other',
       decoration: const InputDecoration(
         labelText: 'Category',
-        border: OutlineInputBorder(),
-        contentPadding: EdgeInsets.symmetric(horizontal: 12, vertical: 8),
+        contentPadding: EdgeInsets.symmetric(horizontal: 12, vertical: 10),
       ),
+      isExpanded: true,
       items: AppConstants.expenseCategories.map((category) {
         return DropdownMenuItem(
           value: category,
           child: Row(
             children: [
               Icon(
-                AppConstants.categoryIcons[category] ?? Icons.category,
-                color: AppConstants.categoryColors[category] ?? Colors.grey,
-                size: 20,
+                AppConstants.categoryIcons[category] ??
+                    Icons.category_rounded,
+                color: AppConstants.categoryColors[category] ??
+                    AppConstants.textTertiary,
+                size: 18,
               ),
-              const SizedBox(width: 8),
-              Text(category),
+              const SizedBox(width: AppSpacing.sm),
+              Flexible(
+                child: Text(
+                  category,
+                  overflow: TextOverflow.ellipsis,
+                ),
+              ),
             ],
           ),
         );
@@ -396,30 +505,48 @@ class _ReceiptItemsScreenState extends State<ReceiptItemsScreen> {
     return Row(
       mainAxisSize: MainAxisSize.min,
       children: [
-        IconButton(
-          icon: const Icon(Icons.remove),
+        _buildQtyButton(
+          icon: Icons.remove_rounded,
           onPressed: () => _updateItemQuantity(index, currentQuantity - 1),
         ),
         Container(
-          padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
+          width: 36,
+          alignment: Alignment.center,
+          padding: const EdgeInsets.symmetric(horizontal: 4, vertical: 6),
           decoration: BoxDecoration(
-            border: Border.all(color: Colors.grey),
-            borderRadius: BorderRadius.circular(4),
+            border: Border.all(color: AppConstants.borderColor),
+            borderRadius: BorderRadius.circular(AppBorderRadius.sm),
           ),
           child: Text(
             currentQuantity.toString(),
-            style: const TextStyle(fontSize: 16, fontWeight: FontWeight.w500),
+            style: AppTextStyles.bodyText1.copyWith(
+              fontWeight: FontWeight.w600,
+            ),
+            textAlign: TextAlign.center,
           ),
         ),
-        IconButton(
-          icon: const Icon(Icons.add),
+        _buildQtyButton(
+          icon: Icons.add_rounded,
           onPressed: () => _updateItemQuantity(index, currentQuantity + 1),
         ),
       ],
     );
   }
 
-  String _formatDate(DateTime date) {
-    return '${date.month}/${date.day}/${date.year}';
+  Widget _buildQtyButton({
+    required IconData icon,
+    required VoidCallback onPressed,
+  }) {
+    return SizedBox(
+      width: 32,
+      height: 32,
+      child: IconButton(
+        icon: Icon(icon, size: 18),
+        onPressed: onPressed,
+        padding: EdgeInsets.zero,
+        constraints: const BoxConstraints(),
+        color: AppConstants.textSecondary,
+      ),
+    );
   }
 }

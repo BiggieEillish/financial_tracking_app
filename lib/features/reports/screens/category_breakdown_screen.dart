@@ -1,23 +1,14 @@
 import 'package:flutter/material.dart';
+import 'package:flutter_bloc/flutter_bloc.dart';
 import '../../../shared/constants/app_constants.dart';
-import '../../../core/database/database_service.dart';
-import '../../../core/database/database.dart';
+import '../bloc/reports_cubit.dart';
+import '../bloc/reports_state.dart';
+import '../widgets/category_pie_chart.dart';
 
-class CategoryBreakdownScreen extends StatefulWidget {
+class CategoryBreakdownScreen extends StatelessWidget {
   const CategoryBreakdownScreen({super.key});
 
-  @override
-  State<CategoryBreakdownScreen> createState() =>
-      _CategoryBreakdownScreenState();
-}
-
-class _CategoryBreakdownScreenState extends State<CategoryBreakdownScreen> {
-  final DatabaseService _databaseService = DatabaseService();
-  List<Expense> _expenses = [];
-  bool _isLoading = true;
-  String _selectedPeriod = 'All Time';
-
-  final List<String> _periods = [
+  static const List<String> _periods = [
     'This Week',
     'This Month',
     'Last Month',
@@ -27,99 +18,6 @@ class _CategoryBreakdownScreenState extends State<CategoryBreakdownScreen> {
   ];
 
   @override
-  void initState() {
-    super.initState();
-    _loadData();
-  }
-
-  Future<void> _loadData() async {
-    setState(() => _isLoading = true);
-    try {
-      final expenses = await _databaseService.getAllExpenses();
-      setState(() {
-        _expenses = expenses;
-        _isLoading = false;
-      });
-    } catch (e) {
-      setState(() => _isLoading = false);
-      if (mounted) {
-        ScaffoldMessenger.of(context).showSnackBar(
-          SnackBar(content: Text('Error loading category breakdown: $e')),
-        );
-      }
-    }
-  }
-
-  List<Expense> _getFilteredExpenses() {
-    final now = DateTime.now();
-    final startOfWeek = now.subtract(Duration(days: now.weekday - 1));
-    final startOfMonth = DateTime(now.year, now.month, 1);
-    final startOfLastMonth = DateTime(now.year, now.month - 1, 1);
-    final startOfQuarter =
-        DateTime(now.year, ((now.month - 1) ~/ 3) * 3 + 1, 1);
-    final startOfYear = DateTime(now.year, 1, 1);
-
-    switch (_selectedPeriod) {
-      case 'This Week':
-        return _expenses.where((e) => e.date.isAfter(startOfWeek)).toList();
-      case 'This Month':
-        return _expenses.where((e) => e.date.isAfter(startOfMonth)).toList();
-      case 'Last Month':
-        final endOfLastMonth = DateTime(now.year, now.month, 1);
-        return _expenses
-            .where((e) =>
-                e.date.isAfter(startOfLastMonth) &&
-                e.date.isBefore(endOfLastMonth))
-            .toList();
-      case 'This Quarter':
-        return _expenses.where((e) => e.date.isAfter(startOfQuarter)).toList();
-      case 'This Year':
-        return _expenses.where((e) => e.date.isAfter(startOfYear)).toList();
-      case 'All Time':
-      default:
-        return _expenses;
-    }
-  }
-
-  Map<String, double> _getCategorySpending() {
-    final filteredExpenses = _getFilteredExpenses();
-    final categorySpending = <String, double>{};
-
-    for (final expense in filteredExpenses) {
-      categorySpending[expense.category] =
-          (categorySpending[expense.category] ?? 0.0) + expense.amount;
-    }
-
-    return categorySpending;
-  }
-
-  List<MapEntry<String, double>> _getSortedCategoryData() {
-    final categorySpending = _getCategorySpending();
-    final sortedData = categorySpending.entries.toList()
-      ..sort((a, b) => b.value.compareTo(a.value));
-    return sortedData;
-  }
-
-  double _getTotalSpending() {
-    return _getFilteredExpenses()
-        .fold(0.0, (sum, expense) => sum + expense.amount);
-  }
-
-  String _getTopCategory() {
-    final sortedData = _getSortedCategoryData();
-    if (sortedData.isEmpty) return 'No expenses';
-    return sortedData.first.key;
-  }
-
-  double _getTopCategoryPercentage() {
-    final sortedData = _getSortedCategoryData();
-    if (sortedData.isEmpty) return 0.0;
-    final totalSpending = _getTotalSpending();
-    if (totalSpending == 0) return 0.0;
-    return (sortedData.first.value / totalSpending) * 100;
-  }
-
-  @override
   Widget build(BuildContext context) {
     return Scaffold(
       appBar: AppBar(
@@ -127,35 +25,60 @@ class _CategoryBreakdownScreenState extends State<CategoryBreakdownScreen> {
         actions: [
           IconButton(
             icon: const Icon(Icons.refresh),
-            onPressed: _loadData,
+            onPressed: () => context.read<ReportsCubit>().loadReports(),
           ),
         ],
       ),
-      body: _isLoading
-          ? const Center(child: CircularProgressIndicator())
-          : RefreshIndicator(
-              onRefresh: _loadData,
+      body: BlocBuilder<ReportsCubit, ReportsState>(
+        builder: (context, state) {
+          if (state is ReportsLoading) {
+            return const Center(child: CircularProgressIndicator());
+          }
+          if (state is ReportsError) {
+            return Center(child: Text(state.message));
+          }
+          if (state is ReportsLoaded) {
+            final categorySpending = state.categorySpending;
+            final totalSpending = state.totalSpent;
+            final sortedData = categorySpending.entries.toList()
+              ..sort((a, b) => b.value.compareTo(a.value));
+
+            String topCategory = 'No expenses';
+            double topCategoryPercentage = 0.0;
+            if (sortedData.isNotEmpty && totalSpending > 0) {
+              topCategory = sortedData.first.key;
+              topCategoryPercentage =
+                  (sortedData.first.value / totalSpending) * 100;
+            }
+
+            return RefreshIndicator(
+              onRefresh: () => context.read<ReportsCubit>().loadReports(),
               child: SingleChildScrollView(
                 physics: const AlwaysScrollableScrollPhysics(),
                 padding: const EdgeInsets.all(AppConstants.defaultPadding),
                 child: Column(
                   crossAxisAlignment: CrossAxisAlignment.start,
                   children: [
-                    _buildPeriodSelector(),
+                    _buildPeriodSelector(context, state),
                     const SizedBox(height: AppSpacing.lg),
-                    _buildSummaryCards(),
+                    _buildSummaryCards(totalSpending, topCategory,
+                        topCategoryPercentage, categorySpending.length),
                     const SizedBox(height: AppSpacing.lg),
-                    _buildCategoryChart(),
+                    _buildCategoryChart(categorySpending, totalSpending),
                     const SizedBox(height: AppSpacing.lg),
-                    _buildCategoryList(),
+                    _buildCategoryList(sortedData, totalSpending),
                   ],
                 ),
               ),
-            ),
+            );
+          }
+          return const Center(child: CircularProgressIndicator());
+        },
+      ),
     );
   }
 
-  Widget _buildPeriodSelector() {
+  Widget _buildPeriodSelector(BuildContext context, ReportsLoaded state) {
     return Card(
       elevation: AppConstants.defaultElevation,
       shape: RoundedRectangleBorder(
@@ -180,7 +103,7 @@ class _CategoryBreakdownScreenState extends State<CategoryBreakdownScreen> {
                     BorderRadius.circular(AppConstants.defaultBorderRadius),
               ),
               child: DropdownButtonFormField<String>(
-                value: _selectedPeriod,
+                value: state.selectedPeriod,
                 decoration: const InputDecoration(
                   border: InputBorder.none,
                   contentPadding: EdgeInsets.symmetric(
@@ -196,7 +119,7 @@ class _CategoryBreakdownScreenState extends State<CategoryBreakdownScreen> {
                 }).toList(),
                 onChanged: (value) {
                   if (value != null) {
-                    setState(() => _selectedPeriod = value);
+                    context.read<ReportsCubit>().changePeriod(value);
                   }
                 },
               ),
@@ -207,19 +130,12 @@ class _CategoryBreakdownScreenState extends State<CategoryBreakdownScreen> {
     );
   }
 
-  Widget _buildSummaryCards() {
-    final totalSpending = _getTotalSpending();
-    final topCategory = _getTopCategory();
-    final topCategoryPercentage = _getTopCategoryPercentage();
-    final categoryCount = _getCategorySpending().length;
-
+  Widget _buildSummaryCards(double totalSpending, String topCategory,
+      double topCategoryPercentage, int categoryCount) {
     return Column(
       crossAxisAlignment: CrossAxisAlignment.start,
       children: [
-        Text(
-          'Summary',
-          style: AppTextStyles.headline3,
-        ),
+        Text('Summary', style: AppTextStyles.headline3),
         const SizedBox(height: AppSpacing.md),
         Row(
           children: [
@@ -304,11 +220,9 @@ class _CategoryBreakdownScreenState extends State<CategoryBreakdownScreen> {
     );
   }
 
-  Widget _buildCategoryChart() {
-    final sortedData = _getSortedCategoryData();
-    final totalSpending = _getTotalSpending();
-
-    if (sortedData.isEmpty) {
+  Widget _buildCategoryChart(
+      Map<String, double> categorySpending, double totalSpending) {
+    if (categorySpending.isEmpty) {
       return Card(
         elevation: AppConstants.defaultElevation,
         shape: RoundedRectangleBorder(
@@ -318,11 +232,7 @@ class _CategoryBreakdownScreenState extends State<CategoryBreakdownScreen> {
           padding: const EdgeInsets.all(AppSpacing.xl),
           child: Column(
             children: [
-              Icon(
-                Icons.pie_chart,
-                size: 64,
-                color: Colors.grey[400],
-              ),
+              Icon(Icons.pie_chart, size: 64, color: Colors.grey[400]),
               const SizedBox(height: AppSpacing.md),
               Text(
                 'No spending data',
@@ -351,26 +261,11 @@ class _CategoryBreakdownScreenState extends State<CategoryBreakdownScreen> {
         child: Column(
           crossAxisAlignment: CrossAxisAlignment.start,
           children: [
-            Text(
-              'Category Distribution',
-              style: AppTextStyles.headline3,
-            ),
-            const SizedBox(height: AppSpacing.lg),
-            SizedBox(
-              height: 200,
-              child: Row(
-                children: [
-                  Expanded(
-                    flex: 2,
-                    child: _buildPieChart(sortedData, totalSpending),
-                  ),
-                  const SizedBox(width: AppSpacing.lg),
-                  Expanded(
-                    flex: 1,
-                    child: _buildChartLegend(sortedData, totalSpending),
-                  ),
-                ],
-              ),
+            Text('Category Distribution', style: AppTextStyles.headline3),
+            const SizedBox(height: AppSpacing.md),
+            CategoryPieChart(
+              categorySpending: categorySpending,
+              totalSpending: totalSpending,
             ),
           ],
         ),
@@ -378,66 +273,8 @@ class _CategoryBreakdownScreenState extends State<CategoryBreakdownScreen> {
     );
   }
 
-  Widget _buildPieChart(List<MapEntry<String, double>> data, double total) {
-    return CustomPaint(
-      size: const Size(150, 150),
-      painter: PieChartPainter(data, total),
-    );
-  }
-
-  Widget _buildChartLegend(List<MapEntry<String, double>> data, double total) {
-    return Column(
-      crossAxisAlignment: CrossAxisAlignment.start,
-      children: data.take(5).map((entry) {
-        final percentage = total > 0 ? (entry.value / total) * 100 : 0.0;
-        final color = AppConstants.categoryColors[entry.key] ?? Colors.grey;
-
-        return Padding(
-          padding: const EdgeInsets.only(bottom: AppSpacing.sm),
-          child: Row(
-            children: [
-              Container(
-                width: 12,
-                height: 12,
-                decoration: BoxDecoration(
-                  color: color,
-                  shape: BoxShape.circle,
-                ),
-              ),
-              const SizedBox(width: AppSpacing.sm),
-              Expanded(
-                child: Column(
-                  crossAxisAlignment: CrossAxisAlignment.start,
-                  children: [
-                    Text(
-                      entry.key,
-                      style: AppTextStyles.caption.copyWith(
-                        fontWeight: FontWeight.w600,
-                      ),
-                      maxLines: 1,
-                      overflow: TextOverflow.ellipsis,
-                    ),
-                    Text(
-                      '${percentage.toStringAsFixed(1)}%',
-                      style: AppTextStyles.caption.copyWith(
-                        color: Colors.grey[600],
-                        fontSize: 10,
-                      ),
-                    ),
-                  ],
-                ),
-              ),
-            ],
-          ),
-        );
-      }).toList(),
-    );
-  }
-
-  Widget _buildCategoryList() {
-    final sortedData = _getSortedCategoryData();
-    final totalSpending = _getTotalSpending();
-
+  Widget _buildCategoryList(
+      List<MapEntry<String, double>> sortedData, double totalSpending) {
     if (sortedData.isEmpty) {
       return const SizedBox.shrink();
     }
@@ -445,14 +282,12 @@ class _CategoryBreakdownScreenState extends State<CategoryBreakdownScreen> {
     return Column(
       crossAxisAlignment: CrossAxisAlignment.start,
       children: [
-        Text(
-          'Category Details',
-          style: AppTextStyles.headline3,
-        ),
+        Text('Category Details', style: AppTextStyles.headline3),
         const SizedBox(height: AppSpacing.md),
         ...sortedData.map((entry) {
-          final percentage =
-              totalSpending > 0 ? (entry.value / totalSpending) * 100 : 0.0;
+          final percentage = totalSpending > 0
+              ? (entry.value / totalSpending) * 100
+              : 0.0;
           final color = AppConstants.categoryColors[entry.key] ?? Colors.grey;
 
           return Card(
@@ -533,45 +368,8 @@ class _CategoryBreakdownScreenState extends State<CategoryBreakdownScreen> {
               ),
             ),
           );
-        }).toList(),
+        }),
       ],
     );
   }
-}
-
-class PieChartPainter extends CustomPainter {
-  final List<MapEntry<String, double>> data;
-  final double total;
-
-  PieChartPainter(this.data, this.total);
-
-  @override
-  void paint(Canvas canvas, Size size) {
-    final center = Offset(size.width / 2, size.height / 2);
-    final radius = size.width / 2;
-
-    double startAngle = 0;
-
-    for (final entry in data) {
-      final sweepAngle = total > 0 ? (entry.value / total) * 2 * 3.14159 : 0.0;
-      final color = AppConstants.categoryColors[entry.key] ?? Colors.grey;
-
-      final paint = Paint()
-        ..color = color
-        ..style = PaintingStyle.fill;
-
-      canvas.drawArc(
-        Rect.fromCircle(center: center, radius: radius),
-        startAngle,
-        sweepAngle,
-        true,
-        paint,
-      );
-
-      startAngle += sweepAngle;
-    }
-  }
-
-  @override
-  bool shouldRepaint(covariant CustomPainter oldDelegate) => false;
 }

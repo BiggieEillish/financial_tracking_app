@@ -55,6 +55,32 @@ dependencies:
   # PDF support
   file_picker: ^8.0.0+1
 
+  # Typography
+  google_fonts: ^6.2.1
+
+  # State management
+  flutter_bloc: ^8.1.0
+  equatable: ^2.0.5
+
+  # Charts
+  fl_chart: ^0.68.0
+
+  # Auth & Security
+  local_auth: ^2.2.0
+  flutter_secure_storage: ^10.0.0
+
+  # Image processing
+  image_cropper: ^11.0.0
+
+  # PDF text extraction
+  syncfusion_flutter_pdf: ^24.1.0
+
+  # Export & sharing
+  share_plus: ^9.0.0
+  csv: ^6.0.0
+  pdf: ^3.10.0
+  printing: ^5.12.0
+
 dev_dependencies:
   flutter_test:
     sdk: flutter
@@ -69,6 +95,10 @@ dev_dependencies:
   # Database build dependencies
   drift_dev: ^2.15.0
   build_runner: ^2.4.0
+
+  # Testing
+  mocktail: ^1.0.0
+  bloc_test: ^9.1.0
 
 # For information on the generic Dart part of this file, see the
 # following page: https://dart.dev/tools/pub/pubspec

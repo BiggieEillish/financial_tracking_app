@@ -1,98 +1,13 @@
 import 'package:flutter/material.dart';
+import 'package:flutter_bloc/flutter_bloc.dart';
 import '../../../shared/constants/app_constants.dart';
-import '../../../core/database/database_service.dart';
 import '../../../core/database/database.dart';
+import '../bloc/reports_cubit.dart';
+import '../bloc/reports_state.dart';
+import '../widgets/budget_bar_chart.dart';
 
-class BudgetPerformanceScreen extends StatefulWidget {
+class BudgetPerformanceScreen extends StatelessWidget {
   const BudgetPerformanceScreen({super.key});
-
-  @override
-  State<BudgetPerformanceScreen> createState() =>
-      _BudgetPerformanceScreenState();
-}
-
-class _BudgetPerformanceScreenState extends State<BudgetPerformanceScreen> {
-  final DatabaseService _databaseService = DatabaseService();
-  List<Expense> _expenses = [];
-  List<Budget> _budgets = [];
-  bool _isLoading = true;
-
-  @override
-  void initState() {
-    super.initState();
-    _loadData();
-  }
-
-  Future<void> _loadData() async {
-    setState(() => _isLoading = true);
-    try {
-      final expenses = await _databaseService.getAllExpenses();
-      final budgets = await _databaseService.getAllBudgets();
-      setState(() {
-        _expenses = expenses;
-        _budgets = budgets;
-        _isLoading = false;
-      });
-    } catch (e) {
-      setState(() => _isLoading = false);
-      if (mounted) {
-        ScaffoldMessenger.of(context).showSnackBar(
-          SnackBar(content: Text('Error loading budget performance: $e')),
-        );
-      }
-    }
-  }
-
-  double _getSpentForCategory(String category) {
-    return _expenses
-        .where((expense) => expense.category == category)
-        .fold(0.0, (sum, expense) => sum + expense.amount);
-  }
-
-  Budget? _getBudgetForCategory(String category) {
-    try {
-      return _budgets.firstWhere((budget) => budget.category == category);
-    } catch (e) {
-      return null;
-    }
-  }
-
-  double _getTotalBudget() {
-    return _budgets.fold(0.0, (sum, budget) => sum + budget.limit);
-  }
-
-  double _getTotalSpent() {
-    return _expenses.fold(0.0, (sum, expense) => sum + expense.amount);
-  }
-
-  double _getOverallPerformance() {
-    final totalBudget = _getTotalBudget();
-    if (totalBudget == 0) return 0.0;
-    return (_getTotalSpent() / totalBudget) * 100;
-  }
-
-  List<BudgetPerformance> _getBudgetPerformances() {
-    final performances = <BudgetPerformance>[];
-
-    for (final budget in _budgets) {
-      final spent = _getSpentForCategory(budget.category);
-      final percentage = (spent / budget.limit) * 100;
-      final remaining = budget.limit - spent;
-      final isOverBudget = spent > budget.limit;
-
-      performances.add(BudgetPerformance(
-        budget: budget,
-        spent: spent,
-        percentage: percentage,
-        remaining: remaining,
-        isOverBudget: isOverBudget,
-      ));
-    }
-
-    // Sort by performance (worst first)
-    performances.sort((a, b) => b.percentage.compareTo(a.percentage));
-    return performances;
-  }
 
   @override
   Widget build(BuildContext context) {
@@ -102,41 +17,80 @@ class _BudgetPerformanceScreenState extends State<BudgetPerformanceScreen> {
         actions: [
           IconButton(
             icon: const Icon(Icons.refresh),
-            onPressed: _loadData,
+            onPressed: () => context.read<ReportsCubit>().loadReports(),
           ),
         ],
       ),
-      body: _isLoading
-          ? const Center(child: CircularProgressIndicator())
-          : RefreshIndicator(
-              onRefresh: _loadData,
+      body: BlocBuilder<ReportsCubit, ReportsState>(
+        builder: (context, state) {
+          if (state is ReportsLoading) {
+            return const Center(child: CircularProgressIndicator());
+          }
+          if (state is ReportsError) {
+            return Center(child: Text(state.message));
+          }
+          if (state is ReportsLoaded) {
+            final performances = _getBudgetPerformances(state);
+            final totalBudget = state.totalBudget;
+            final totalSpent = state.totalSpent;
+            final remaining = totalBudget - totalSpent;
+            final performance =
+                totalBudget > 0 ? (totalSpent / totalBudget) * 100 : 0.0;
+            final isOverBudget = totalSpent > totalBudget;
+
+            return RefreshIndicator(
+              onRefresh: () => context.read<ReportsCubit>().loadReports(),
               child: SingleChildScrollView(
                 physics: const AlwaysScrollableScrollPhysics(),
                 padding: const EdgeInsets.all(AppConstants.defaultPadding),
                 child: Column(
                   crossAxisAlignment: CrossAxisAlignment.start,
                   children: [
-                    _buildOverallPerformance(),
+                    _buildOverallPerformance(totalBudget, totalSpent,
+                        remaining, performance, isOverBudget),
                     const SizedBox(height: AppSpacing.lg),
-                    _buildPerformanceSummary(),
+                    _buildBudgetChart(performances),
                     const SizedBox(height: AppSpacing.lg),
-                    _buildBudgetPerformances(),
+                    _buildPerformanceSummary(performances),
                     const SizedBox(height: AppSpacing.lg),
-                    _buildRecommendations(),
+                    _buildBudgetPerformances(performances),
+                    const SizedBox(height: AppSpacing.lg),
+                    _buildRecommendations(performances),
                   ],
                 ),
               ),
-            ),
+            );
+          }
+          return const Center(child: CircularProgressIndicator());
+        },
+      ),
     );
   }
 
-  Widget _buildOverallPerformance() {
-    final totalBudget = _getTotalBudget();
-    final totalSpent = _getTotalSpent();
-    final remaining = totalBudget - totalSpent;
-    final performance = _getOverallPerformance();
-    final isOverBudget = totalSpent > totalBudget;
+  List<_BudgetPerformance> _getBudgetPerformances(ReportsLoaded state) {
+    final performances = <_BudgetPerformance>[];
 
+    for (final budget in state.budgets) {
+      final spent = state.categorySpending[budget.category] ?? 0.0;
+      final percentage = (spent / budget.limit) * 100;
+      final remaining = budget.limit - spent;
+      final isOverBudget = spent > budget.limit;
+
+      performances.add(_BudgetPerformance(
+        budget: budget,
+        spent: spent,
+        percentage: percentage,
+        remaining: remaining,
+        isOverBudget: isOverBudget,
+      ));
+    }
+
+    performances.sort((a, b) => b.percentage.compareTo(a.percentage));
+    return performances;
+  }
+
+  Widget _buildOverallPerformance(double totalBudget, double totalSpent,
+      double remaining, double performance, bool isOverBudget) {
     return Card(
       elevation: AppConstants.defaultElevation,
       shape: RoundedRectangleBorder(
@@ -150,10 +104,7 @@ class _BudgetPerformanceScreenState extends State<BudgetPerformanceScreen> {
             Row(
               mainAxisAlignment: MainAxisAlignment.spaceBetween,
               children: [
-                Text(
-                  'Overall Performance',
-                  style: AppTextStyles.headline3,
-                ),
+                Text('Overall Performance', style: AppTextStyles.headline3),
                 Container(
                   padding: const EdgeInsets.symmetric(
                     horizontal: AppSpacing.sm,
@@ -255,8 +206,39 @@ class _BudgetPerformanceScreenState extends State<BudgetPerformanceScreen> {
     );
   }
 
-  Widget _buildPerformanceSummary() {
-    final performances = _getBudgetPerformances();
+  Widget _buildBudgetChart(List<_BudgetPerformance> performances) {
+    if (performances.isEmpty) {
+      return const SizedBox.shrink();
+    }
+
+    final barData = performances
+        .map((p) => BudgetBarData(
+              category: p.budget.category,
+              budgetLimit: p.budget.limit,
+              spent: p.spent,
+            ))
+        .toList();
+
+    return Card(
+      elevation: AppConstants.defaultElevation,
+      shape: RoundedRectangleBorder(
+        borderRadius: BorderRadius.circular(AppConstants.defaultBorderRadius),
+      ),
+      child: Padding(
+        padding: const EdgeInsets.all(AppSpacing.lg),
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            Text('Budget vs Spending', style: AppTextStyles.headline3),
+            const SizedBox(height: AppSpacing.md),
+            BudgetBarChart(data: barData),
+          ],
+        ),
+      ),
+    );
+  }
+
+  Widget _buildPerformanceSummary(List<_BudgetPerformance> performances) {
     if (performances.isEmpty) {
       return Card(
         elevation: AppConstants.defaultElevation,
@@ -267,11 +249,7 @@ class _BudgetPerformanceScreenState extends State<BudgetPerformanceScreen> {
           padding: const EdgeInsets.all(AppSpacing.xl),
           child: Column(
             children: [
-              Icon(
-                Icons.assessment,
-                size: 64,
-                color: Colors.grey[400],
-              ),
+              Icon(Icons.assessment, size: 64, color: Colors.grey[400]),
               const SizedBox(height: AppSpacing.md),
               Text(
                 'No budgets set',
@@ -305,10 +283,7 @@ class _BudgetPerformanceScreenState extends State<BudgetPerformanceScreen> {
         child: Column(
           crossAxisAlignment: CrossAxisAlignment.start,
           children: [
-            Text(
-              'Performance Summary',
-              style: AppTextStyles.headline3,
-            ),
+            Text('Performance Summary', style: AppTextStyles.headline3),
             const SizedBox(height: AppSpacing.md),
             Row(
               children: [
@@ -338,11 +313,11 @@ class _BudgetPerformanceScreenState extends State<BudgetPerformanceScreen> {
                   child: _buildSummaryCard(
                     'Best Performing',
                     bestPerforming.budget.category,
-                    AppConstants
-                            .categoryIcons[bestPerforming.budget.category] ??
+                    AppConstants.categoryIcons[
+                            bestPerforming.budget.category] ??
                         Icons.star,
-                    AppConstants
-                            .categoryColors[bestPerforming.budget.category] ??
+                    AppConstants.categoryColors[
+                            bestPerforming.budget.category] ??
                         AppConstants.successColor,
                   ),
                 ),
@@ -351,11 +326,11 @@ class _BudgetPerformanceScreenState extends State<BudgetPerformanceScreen> {
                   child: _buildSummaryCard(
                     'Needs Attention',
                     worstPerforming.budget.category,
-                    AppConstants
-                            .categoryIcons[worstPerforming.budget.category] ??
+                    AppConstants.categoryIcons[
+                            worstPerforming.budget.category] ??
                         Icons.warning,
-                    AppConstants
-                            .categoryColors[worstPerforming.budget.category] ??
+                    AppConstants.categoryColors[
+                            worstPerforming.budget.category] ??
                         AppConstants.errorColor,
                   ),
                 ),
@@ -402,9 +377,7 @@ class _BudgetPerformanceScreenState extends State<BudgetPerformanceScreen> {
     );
   }
 
-  Widget _buildBudgetPerformances() {
-    final performances = _getBudgetPerformances();
-
+  Widget _buildBudgetPerformances(List<_BudgetPerformance> performances) {
     if (performances.isEmpty) {
       return const SizedBox.shrink();
     }
@@ -412,19 +385,14 @@ class _BudgetPerformanceScreenState extends State<BudgetPerformanceScreen> {
     return Column(
       crossAxisAlignment: CrossAxisAlignment.start,
       children: [
-        Text(
-          'Budget Performance Details',
-          style: AppTextStyles.headline3,
-        ),
+        Text('Budget Performance Details', style: AppTextStyles.headline3),
         const SizedBox(height: AppSpacing.md),
-        ...performances
-            .map((performance) => _buildPerformanceCard(performance))
-            .toList(),
+        ...performances.map((performance) => _buildPerformanceCard(performance)),
       ],
     );
   }
 
-  Widget _buildPerformanceCard(BudgetPerformance performance) {
+  Widget _buildPerformanceCard(_BudgetPerformance performance) {
     final color =
         AppConstants.categoryColors[performance.budget.category] ?? Colors.grey;
 
@@ -523,8 +491,7 @@ class _BudgetPerformanceScreenState extends State<BudgetPerformanceScreen> {
     );
   }
 
-  Widget _buildRecommendations() {
-    final performances = _getBudgetPerformances();
+  Widget _buildRecommendations(List<_BudgetPerformance> performances) {
     if (performances.isEmpty) {
       return const SizedBox.shrink();
     }
@@ -561,42 +528,31 @@ class _BudgetPerformanceScreenState extends State<BudgetPerformanceScreen> {
           children: [
             Row(
               children: [
-                Icon(
-                  Icons.lightbulb,
-                  color: AppConstants.warningColor,
-                  size: 24,
-                ),
+                Icon(Icons.lightbulb,
+                    color: AppConstants.warningColor, size: 24),
                 const SizedBox(width: AppSpacing.sm),
-                Text(
-                  'Recommendations',
-                  style: AppTextStyles.headline3,
-                ),
+                Text('Recommendations', style: AppTextStyles.headline3),
               ],
             ),
             const SizedBox(height: AppSpacing.md),
-            ...recommendations
-                .map((recommendation) => Padding(
-                      padding: const EdgeInsets.only(bottom: AppSpacing.sm),
-                      child: Row(
-                        crossAxisAlignment: CrossAxisAlignment.start,
-                        children: [
-                          Icon(
-                            Icons.check_circle,
-                            color: AppConstants.successColor,
-                            size: 16,
-                          ),
-                          const SizedBox(width: AppSpacing.sm),
-                          Expanded(
-                            child: Text(
-                              recommendation,
-                              style: AppTextStyles.bodyText2
-                                  .copyWith(color: Colors.grey[700]),
-                            ),
-                          ),
-                        ],
+            ...recommendations.map((recommendation) => Padding(
+                  padding: const EdgeInsets.only(bottom: AppSpacing.sm),
+                  child: Row(
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    children: [
+                      Icon(Icons.check_circle,
+                          color: AppConstants.successColor, size: 16),
+                      const SizedBox(width: AppSpacing.sm),
+                      Expanded(
+                        child: Text(
+                          recommendation,
+                          style: AppTextStyles.bodyText2
+                              .copyWith(color: Colors.grey[700]),
+                        ),
                       ),
-                    ))
-                .toList(),
+                    ],
+                  ),
+                )),
           ],
         ),
       ),
@@ -604,14 +560,14 @@ class _BudgetPerformanceScreenState extends State<BudgetPerformanceScreen> {
   }
 }
 
-class BudgetPerformance {
+class _BudgetPerformance {
   final Budget budget;
   final double spent;
   final double percentage;
   final double remaining;
   final bool isOverBudget;
 
-  BudgetPerformance({
+  _BudgetPerformance({
     required this.budget,
     required this.spent,
     required this.percentage,

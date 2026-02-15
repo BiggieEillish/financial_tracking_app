@@ -1,112 +1,132 @@
 import 'package:flutter/material.dart';
+import 'package:flutter_bloc/flutter_bloc.dart';
 import 'package:go_router/go_router.dart';
 import '../../../shared/constants/app_constants.dart';
-import '../../../core/database/database_service.dart';
 import '../../../core/database/database.dart';
+import '../../../core/models/expense_group_with_items.dart';
+import '../bloc/budget_list_cubit.dart';
+import '../bloc/budget_list_state.dart';
 
-class BudgetDetailScreen extends StatefulWidget {
+class BudgetDetailScreen extends StatelessWidget {
   final Budget budget;
 
   const BudgetDetailScreen({super.key, required this.budget});
 
   @override
-  State<BudgetDetailScreen> createState() => _BudgetDetailScreenState();
-}
-
-class _BudgetDetailScreenState extends State<BudgetDetailScreen> {
-  final DatabaseService _databaseService = DatabaseService();
-  List<Expense> _expenses = [];
-  bool _isLoading = true;
-
-  @override
-  void initState() {
-    super.initState();
-    _loadExpenses();
-  }
-
-  Future<void> _loadExpenses() async {
-    setState(() => _isLoading = true);
-    try {
-      final allExpenses = await _databaseService.database.getAllExpenses();
-      final categoryExpenses = allExpenses
-          .where((expense) => expense.category == widget.budget.category)
-          .where((expense) =>
-              expense.date.isAfter(widget.budget.periodStart) &&
-              expense.date.isBefore(widget.budget.periodEnd))
-          .toList();
-
-      categoryExpenses.sort((a, b) => b.date.compareTo(a.date));
-
-      setState(() {
-        _expenses = categoryExpenses;
-        _isLoading = false;
-      });
-    } catch (e) {
-      setState(() => _isLoading = false);
-      if (mounted) {
-        ScaffoldMessenger.of(context).showSnackBar(
-          SnackBar(content: Text('Error loading expenses: $e')),
-        );
-      }
-    }
-  }
-
-  double _getTotalSpent() {
-    return _expenses.fold(0.0, (sum, expense) => sum + expense.amount);
-  }
-
-  double _getRemaining() {
-    return widget.budget.limit - _getTotalSpent();
-  }
-
-  double _getPercentage() {
-    return (_getTotalSpent() / widget.budget.limit).clamp(0.0, 1.0);
-  }
-
-  bool _isOverBudget() {
-    return _getTotalSpent() > widget.budget.limit;
-  }
-
-  @override
   Widget build(BuildContext context) {
-    final totalSpent = _getTotalSpent();
-    final remaining = _getRemaining();
-    final percentage = _getPercentage();
-    final isOverBudget = _isOverBudget();
+    return BlocBuilder<BudgetListCubit, BudgetListState>(
+      builder: (context, state) {
+        // Collect matching items from groups for display
+        final matchingItems = <_BudgetExpenseItem>[];
+        if (state is BudgetListLoaded) {
+          for (final group in state.expenseGroups) {
+            if (group.group.date.isAfter(budget.periodStart) &&
+                group.group.date.isBefore(budget.periodEnd)) {
+              for (final item in group.items) {
+                if (item.category == budget.category) {
+                  matchingItems.add(_BudgetExpenseItem(
+                    description: item.description,
+                    category: item.category,
+                    amount: item.amount * item.quantity,
+                    date: group.group.date,
+                    groupId: group.group.id,
+                  ));
+                }
+              }
+            }
+          }
+          matchingItems.sort((a, b) => b.date.compareTo(a.date));
+        }
 
-    return Scaffold(
-      appBar: AppBar(
-        title: Text(widget.budget.category),
-        actions: [
-          IconButton(
-            icon: const Icon(Icons.refresh),
-            onPressed: _loadExpenses,
-          ),
-        ],
-      ),
-      body: _isLoading
-          ? const Center(child: CircularProgressIndicator())
-          : RefreshIndicator(
-              onRefresh: _loadExpenses,
-              child: SingleChildScrollView(
-                physics: const AlwaysScrollableScrollPhysics(),
-                padding: const EdgeInsets.all(AppConstants.defaultPadding),
-                child: Column(
-                  crossAxisAlignment: CrossAxisAlignment.start,
-                  children: [
-                    _buildBudgetHeader(
-                        totalSpent, remaining, percentage, isOverBudget),
-                    const SizedBox(height: AppSpacing.lg),
-                    _buildBudgetProgress(percentage, isOverBudget),
-                    const SizedBox(height: AppSpacing.lg),
-                    _buildPeriodInfo(),
-                    const SizedBox(height: AppSpacing.lg),
-                    _buildExpensesList(),
-                  ],
-                ),
+        final totalSpent =
+            matchingItems.fold(0.0, (sum, item) => sum + item.amount);
+        final remaining = budget.limit - totalSpent;
+        final percentage = (totalSpent / budget.limit).clamp(0.0, 1.0);
+        final isOverBudget = totalSpent > budget.limit;
+
+        return Scaffold(
+          appBar: AppBar(
+            title: Text(budget.category),
+            actions: [
+              IconButton(
+                icon: const Icon(Icons.delete),
+                onPressed: () => _showDeleteConfirmation(context),
               ),
-            ),
+              IconButton(
+                icon: const Icon(Icons.refresh),
+                onPressed: () =>
+                    context.read<BudgetListCubit>().loadBudgets(),
+              ),
+            ],
+          ),
+          body: state is BudgetListLoading
+              ? const Center(child: CircularProgressIndicator())
+              : RefreshIndicator(
+                  onRefresh: () =>
+                      context.read<BudgetListCubit>().loadBudgets(),
+                  child: SingleChildScrollView(
+                    physics: const AlwaysScrollableScrollPhysics(),
+                    padding:
+                        const EdgeInsets.all(AppConstants.defaultPadding),
+                    child: Column(
+                      crossAxisAlignment: CrossAxisAlignment.start,
+                      children: [
+                        _buildBudgetHeader(
+                            totalSpent, remaining, percentage, isOverBudget),
+                        const SizedBox(height: AppSpacing.lg),
+                        _buildBudgetProgress(
+                            percentage, isOverBudget, remaining),
+                        const SizedBox(height: AppSpacing.lg),
+                        _buildPeriodInfo(),
+                        const SizedBox(height: AppSpacing.lg),
+                        _buildExpensesList(context, matchingItems),
+                      ],
+                    ),
+                  ),
+                ),
+        );
+      },
     );
+  }
+
+  void _showDeleteConfirmation(BuildContext context) {
+    showDialog(
+      context: context,
+      builder: (BuildContext dialogContext) {
+        return AlertDialog(
+          title: const Text('Delete Budget'),
+          content: Text(
+            'Are you sure you want to delete the ${budget.category} budget?\n\n'
+            'Budget: ${AppConstants.currencySymbol}${budget.limit.toStringAsFixed(2)}',
+          ),
+          actions: [
+            TextButton(
+              onPressed: () => Navigator.of(dialogContext).pop(),
+              child: const Text('Cancel'),
+            ),
+            TextButton(
+              onPressed: () {
+                Navigator.of(dialogContext).pop();
+                _deleteBudget(context);
+              },
+              style: TextButton.styleFrom(foregroundColor: Colors.red),
+              child: const Text('Delete'),
+            ),
+          ],
+        );
+      },
+    );
+  }
+
+  void _deleteBudget(BuildContext context) {
+    context.read<BudgetListCubit>().deleteBudget(budget.id);
+    ScaffoldMessenger.of(context).showSnackBar(
+      const SnackBar(
+        content: Text('Budget deleted successfully!'),
+        backgroundColor: AppConstants.successColor,
+      ),
+    );
+    context.pop();
   }
 
   Widget _buildBudgetHeader(double totalSpent, double remaining,
@@ -125,15 +145,15 @@ class _BudgetDetailScreenState extends State<BudgetDetailScreen> {
                 Container(
                   padding: const EdgeInsets.all(AppSpacing.md),
                   decoration: BoxDecoration(
-                    color: AppConstants.categoryColors[widget.budget.category]
+                    color: AppConstants.categoryColors[budget.category]
                         ?.withOpacity(0.1),
                     borderRadius:
                         BorderRadius.circular(AppBorderRadius.circular),
                   ),
                   child: Icon(
-                    AppConstants.categoryIcons[widget.budget.category] ??
+                    AppConstants.categoryIcons[budget.category] ??
                         Icons.category,
-                    color: AppConstants.categoryColors[widget.budget.category],
+                    color: AppConstants.categoryColors[budget.category],
                     size: 32,
                   ),
                 ),
@@ -143,7 +163,7 @@ class _BudgetDetailScreenState extends State<BudgetDetailScreen> {
                     crossAxisAlignment: CrossAxisAlignment.start,
                     children: [
                       Text(
-                        widget.budget.category,
+                        budget.category,
                         style: AppTextStyles.headline2,
                       ),
                       Text(
@@ -162,7 +182,7 @@ class _BudgetDetailScreenState extends State<BudgetDetailScreen> {
                 Expanded(
                   child: _buildHeaderItem(
                     'Budget Limit',
-                    '${AppConstants.currencySymbol}${widget.budget.limit.toStringAsFixed(2)}',
+                    '${AppConstants.currencySymbol}${budget.limit.toStringAsFixed(2)}',
                     AppConstants.primaryColor,
                   ),
                 ),
@@ -213,7 +233,8 @@ class _BudgetDetailScreenState extends State<BudgetDetailScreen> {
     );
   }
 
-  Widget _buildBudgetProgress(double percentage, bool isOverBudget) {
+  Widget _buildBudgetProgress(
+      double percentage, bool isOverBudget, double remaining) {
     return Card(
       elevation: AppConstants.defaultElevation,
       shape: RoundedRectangleBorder(
@@ -268,8 +289,8 @@ class _BudgetDetailScreenState extends State<BudgetDetailScreen> {
             const SizedBox(height: AppSpacing.sm),
             Text(
               isOverBudget
-                  ? 'You are ${AppConstants.currencySymbol}${_getRemaining().abs().toStringAsFixed(2)} over your budget'
-                  : 'You have ${AppConstants.currencySymbol}${_getRemaining().toStringAsFixed(2)} remaining',
+                  ? 'You are ${AppConstants.currencySymbol}${remaining.abs().toStringAsFixed(2)} over your budget'
+                  : 'You have ${AppConstants.currencySymbol}${remaining.toStringAsFixed(2)} remaining',
               style: AppTextStyles.bodyText2.copyWith(
                 color:
                     isOverBudget ? AppConstants.errorColor : Colors.grey[600],
@@ -302,7 +323,7 @@ class _BudgetDetailScreenState extends State<BudgetDetailScreen> {
                 Expanded(
                   child: _buildPeriodItem(
                     'Start Date',
-                    '${widget.budget.periodStart.day}/${widget.budget.periodStart.month}/${widget.budget.periodStart.year}',
+                    '${budget.periodStart.day}/${budget.periodStart.month}/${budget.periodStart.year}',
                     Icons.calendar_today,
                   ),
                 ),
@@ -310,7 +331,7 @@ class _BudgetDetailScreenState extends State<BudgetDetailScreen> {
                 Expanded(
                   child: _buildPeriodItem(
                     'End Date',
-                    '${widget.budget.periodEnd.day}/${widget.budget.periodEnd.month}/${widget.budget.periodEnd.year}',
+                    '${budget.periodEnd.day}/${budget.periodEnd.month}/${budget.periodEnd.year}',
                     Icons.calendar_today,
                   ),
                 ),
@@ -345,7 +366,7 @@ class _BudgetDetailScreenState extends State<BudgetDetailScreen> {
     );
   }
 
-  Widget _buildExpensesList() {
+  Widget _buildExpensesList(BuildContext context, List<_BudgetExpenseItem> items) {
     return Column(
       crossAxisAlignment: CrossAxisAlignment.start,
       children: [
@@ -357,13 +378,13 @@ class _BudgetDetailScreenState extends State<BudgetDetailScreen> {
               style: AppTextStyles.headline3,
             ),
             Text(
-              '${_expenses.length} expenses',
+              '${items.length} expenses',
               style: AppTextStyles.caption.copyWith(color: Colors.grey[600]),
             ),
           ],
         ),
         const SizedBox(height: AppSpacing.md),
-        if (_expenses.isEmpty)
+        if (items.isEmpty)
           Card(
             elevation: AppConstants.defaultElevation,
             shape: RoundedRectangleBorder(
@@ -396,12 +417,14 @@ class _BudgetDetailScreenState extends State<BudgetDetailScreen> {
             ),
           )
         else
-          ..._expenses.map((expense) => _buildExpenseCard(expense)).toList(),
+          ...items
+              .map((item) => _buildExpenseCard(context, item))
+              .toList(),
       ],
     );
   }
 
-  Widget _buildExpenseCard(Expense expense) {
+  Widget _buildExpenseCard(BuildContext context, _BudgetExpenseItem item) {
     return Card(
       margin: const EdgeInsets.only(bottom: AppSpacing.sm),
       elevation: 2,
@@ -413,32 +436,47 @@ class _BudgetDetailScreenState extends State<BudgetDetailScreen> {
           padding: const EdgeInsets.all(AppSpacing.sm),
           decoration: BoxDecoration(
             color:
-                AppConstants.categoryColors[expense.category]?.withOpacity(0.1),
+                AppConstants.categoryColors[item.category]?.withOpacity(0.1),
             borderRadius: BorderRadius.circular(AppBorderRadius.circular),
           ),
           child: Icon(
-            AppConstants.categoryIcons[expense.category] ?? Icons.category,
-            color: AppConstants.categoryColors[expense.category],
+            AppConstants.categoryIcons[item.category] ?? Icons.category,
+            color: AppConstants.categoryColors[item.category],
             size: 20,
           ),
         ),
         title: Text(
-          expense.description,
+          item.description,
           style: AppTextStyles.bodyText1.copyWith(fontWeight: FontWeight.w600),
         ),
         subtitle: Text(
-          '${expense.date.day}/${expense.date.month}/${expense.date.year}',
+          '${item.date.day}/${item.date.month}/${item.date.year}',
           style: AppTextStyles.caption.copyWith(color: Colors.grey[600]),
         ),
         trailing: Text(
-          '${AppConstants.currencySymbol}${expense.amount.toStringAsFixed(2)}',
+          '${AppConstants.currencySymbol}${item.amount.toStringAsFixed(2)}',
           style: AppTextStyles.bodyText1.copyWith(
             color: AppConstants.errorColor,
             fontWeight: FontWeight.w600,
           ),
         ),
-        onTap: () => context.push('/expense-detail', extra: expense),
       ),
     );
   }
+}
+
+class _BudgetExpenseItem {
+  final String description;
+  final String category;
+  final double amount;
+  final DateTime date;
+  final String groupId;
+
+  const _BudgetExpenseItem({
+    required this.description,
+    required this.category,
+    required this.amount,
+    required this.date,
+    required this.groupId,
+  });
 }

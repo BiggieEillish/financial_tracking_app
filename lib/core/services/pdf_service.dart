@@ -1,16 +1,17 @@
 import 'dart:io';
-import 'dart:typed_data';
 import 'package:file_picker/file_picker.dart';
 import 'package:path_provider/path_provider.dart';
 import 'package:path/path.dart' as path;
+import 'package:syncfusion_flutter_pdf/pdf.dart';
 import 'ocr_service.dart';
+import 'receipt_parser.dart';
 
 class PDFService {
   static final PDFService _instance = PDFService._internal();
   factory PDFService() => _instance;
   PDFService._internal();
 
-  final OCRService _ocrService = OCRService();
+  final ReceiptParser _receiptParser = ReceiptParser();
 
   /// Pick a PDF file from device storage
   Future<File?> pickPDFFile() async {
@@ -32,24 +33,29 @@ class PDFService {
     }
   }
 
-  /// Process PDF receipt by converting to image and using OCR
-  /// Note: This is a simplified approach that treats PDFs as images
+  /// Process PDF receipt by extracting text and parsing it
   Future<ReceiptScanResult> processPDFReceipt(File pdfFile) async {
     try {
-      // For now, we'll save the PDF and return a basic result
-      // In a full implementation, you'd convert PDF to images first
       final savedPdfPath = await _savePDFToLocal(pdfFile);
 
-      // Create a basic result - in practice, you'd extract text from PDF
+      // Extract text from PDF using Syncfusion
+      final textLines = await _extractTextFromPDF(pdfFile);
+
+      if (textLines.isNotEmpty) {
+        // Parse using the strategy-based parser
+        final result = _receiptParser.parse(textLines);
+        return ReceiptScanResult(
+          items: result.items,
+          totalAmount: result.totalAmount,
+          storeName: result.storeName,
+          date: result.date,
+          receiptImagePath: savedPdfPath,
+        );
+      }
+
+      // Fallback if no text extracted
       return ReceiptScanResult(
-        items: [
-          ReceiptItem(
-            name: 'PDF Receipt',
-            price: 0.0,
-            quantity: 1,
-            category: 'Other',
-          ),
-        ],
+        items: [],
         totalAmount: 0.0,
         storeName: 'PDF Receipt',
         date: DateTime.now(),
@@ -58,6 +64,32 @@ class PDFService {
     } catch (e) {
       print('Error processing PDF receipt: $e');
       rethrow;
+    }
+  }
+
+  /// Extract text lines from a PDF file using Syncfusion
+  Future<List<String>> _extractTextFromPDF(File pdfFile) async {
+    try {
+      final bytes = await pdfFile.readAsBytes();
+      final PdfDocument document = PdfDocument(inputBytes: bytes);
+
+      final allLines = <String>[];
+      for (int i = 0; i < document.pages.count; i++) {
+        final String pageText =
+            PdfTextExtractor(document).extractText(startPageIndex: i, endPageIndex: i);
+        final lines = pageText
+            .split('\n')
+            .map((line) => line.trim())
+            .where((line) => line.isNotEmpty)
+            .toList();
+        allLines.addAll(lines);
+      }
+
+      document.dispose();
+      return allLines;
+    } catch (e) {
+      print('Error extracting text from PDF: $e');
+      return [];
     }
   }
 
@@ -74,7 +106,6 @@ class PDFService {
       final fileName = 'receipt_${DateTime.now().millisecondsSinceEpoch}.pdf';
       final savedPath = path.join(receiptsDir.path, fileName);
 
-      // Copy the PDF to the receipts directory
       await pdfFile.copy(savedPath);
 
       return savedPath;

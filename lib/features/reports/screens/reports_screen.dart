@@ -1,27 +1,16 @@
 import 'package:flutter/material.dart';
+import 'package:flutter_bloc/flutter_bloc.dart';
 import 'package:go_router/go_router.dart';
 import '../../../shared/constants/app_constants.dart';
-import '../../../core/database/database_service.dart';
-import '../../../core/database/database.dart';
-import 'spending_analytics_screen.dart';
-import 'category_breakdown_screen.dart';
-import 'budget_performance_screen.dart';
+import '../../../core/services/export_service.dart';
+import '../bloc/reports_cubit.dart';
+import '../bloc/reports_state.dart';
+import '../widgets/export_dialog.dart';
 
-class ReportsScreen extends StatefulWidget {
+class ReportsScreen extends StatelessWidget {
   const ReportsScreen({super.key});
 
-  @override
-  State<ReportsScreen> createState() => _ReportsScreenState();
-}
-
-class _ReportsScreenState extends State<ReportsScreen> {
-  final DatabaseService _databaseService = DatabaseService();
-  List<Expense> _expenses = [];
-  List<Budget> _budgets = [];
-  bool _isLoading = true;
-  String _selectedPeriod = 'This Month';
-
-  final List<String> _periods = [
+  static const List<String> _periods = [
     'This Week',
     'This Month',
     'Last Month',
@@ -31,242 +20,183 @@ class _ReportsScreenState extends State<ReportsScreen> {
   ];
 
   @override
-  void initState() {
-    super.initState();
-    _loadData();
-  }
-
-  Future<void> _loadData() async {
-    setState(() => _isLoading = true);
-    try {
-      final expenses = await _databaseService.getAllExpenses();
-      final budgets = await _databaseService.getAllBudgets();
-      setState(() {
-        _expenses = expenses;
-        _budgets = budgets;
-        _isLoading = false;
-      });
-    } catch (e) {
-      setState(() => _isLoading = false);
-      if (mounted) {
-        ScaffoldMessenger.of(context).showSnackBar(
-          SnackBar(content: Text('Error loading reports: $e')),
-        );
-      }
-    }
-  }
-
-  List<Expense> _getFilteredExpenses() {
-    final now = DateTime.now();
-    final startOfWeek = now.subtract(Duration(days: now.weekday - 1));
-    final startOfMonth = DateTime(now.year, now.month, 1);
-    final startOfLastMonth = DateTime(now.year, now.month - 1, 1);
-    final startOfQuarter =
-        DateTime(now.year, ((now.month - 1) ~/ 3) * 3 + 1, 1);
-    final startOfYear = DateTime(now.year, 1, 1);
-
-    switch (_selectedPeriod) {
-      case 'This Week':
-        return _expenses.where((e) => e.date.isAfter(startOfWeek)).toList();
-      case 'This Month':
-        return _expenses.where((e) => e.date.isAfter(startOfMonth)).toList();
-      case 'Last Month':
-        final endOfLastMonth = DateTime(now.year, now.month, 1);
-        return _expenses
-            .where((e) =>
-                e.date.isAfter(startOfLastMonth) &&
-                e.date.isBefore(endOfLastMonth))
-            .toList();
-      case 'This Quarter':
-        return _expenses.where((e) => e.date.isAfter(startOfQuarter)).toList();
-      case 'This Year':
-        return _expenses.where((e) => e.date.isAfter(startOfYear)).toList();
-      case 'All Time':
-      default:
-        return _expenses;
-    }
-  }
-
-  double _getTotalSpent() {
-    return _getFilteredExpenses()
-        .fold(0.0, (sum, expense) => sum + expense.amount);
-  }
-
-  double _getTotalBudget() {
-    return _budgets.fold(0.0, (sum, budget) => sum + budget.limit);
-  }
-
-  Map<String, double> _getCategorySpending() {
-    final filteredExpenses = _getFilteredExpenses();
-    final categorySpending = <String, double>{};
-
-    for (final expense in filteredExpenses) {
-      categorySpending[expense.category] =
-          (categorySpending[expense.category] ?? 0.0) + expense.amount;
-    }
-
-    return categorySpending;
-  }
-
-  String _getTopCategory() {
-    final categorySpending = _getCategorySpending();
-    if (categorySpending.isEmpty) return 'No expenses';
-
-    final sortedCategories = categorySpending.entries.toList()
-      ..sort((a, b) => b.value.compareTo(a.value));
-
-    return sortedCategories.first.key;
-  }
-
-  double _getAverageSpending() {
-    final filteredExpenses = _getFilteredExpenses();
-    if (filteredExpenses.isEmpty) return 0.0;
-    return _getTotalSpent() / filteredExpenses.length;
-  }
-
-  @override
   Widget build(BuildContext context) {
     return Scaffold(
       appBar: AppBar(
-        title: const Text('Financial Reports'),
+        title: const Text('Reports'),
         actions: [
           IconButton(
-            icon: const Icon(Icons.refresh),
-            onPressed: _loadData,
+            icon: const Icon(Icons.file_download_rounded),
+            onPressed: () => _showExportDialog(context),
+            tooltip: 'Export',
+          ),
+          IconButton(
+            icon: const Icon(Icons.refresh_rounded),
+            onPressed: () => context.read<ReportsCubit>().loadReports(),
           ),
         ],
       ),
-      body: _isLoading
-          ? const Center(child: CircularProgressIndicator())
-          : RefreshIndicator(
-              onRefresh: _loadData,
+      body: BlocBuilder<ReportsCubit, ReportsState>(
+        builder: (context, state) {
+          if (state is ReportsLoading) {
+            return const Center(child: CircularProgressIndicator());
+          }
+          if (state is ReportsError) {
+            return Center(
+              child: Padding(
+                padding: const EdgeInsets.all(AppSpacing.lg),
+                child: Text(state.message, style: AppTextStyles.bodyText2),
+              ),
+            );
+          }
+          if (state is ReportsLoaded) {
+            return RefreshIndicator(
+              onRefresh: () => context.read<ReportsCubit>().loadReports(),
               child: SingleChildScrollView(
                 physics: const AlwaysScrollableScrollPhysics(),
-                padding: const EdgeInsets.all(AppConstants.defaultPadding),
+                padding: const EdgeInsets.all(AppSpacing.md),
                 child: Column(
                   crossAxisAlignment: CrossAxisAlignment.start,
                   children: [
-                    _buildPeriodSelector(),
+                    _buildPeriodSelector(context, state),
                     const SizedBox(height: AppSpacing.lg),
-                    _buildSummaryCards(),
+                    _buildSummaryCards(state),
                     const SizedBox(height: AppSpacing.lg),
-                    _buildQuickInsights(),
+                    _buildQuickInsights(state),
                     const SizedBox(height: AppSpacing.lg),
-                    _buildReportCategories(),
+                    _buildReportCategories(context),
                   ],
                 ),
               ),
-            ),
-    );
-  }
-
-  Widget _buildPeriodSelector() {
-    return Card(
-      elevation: AppConstants.defaultElevation,
-      shape: RoundedRectangleBorder(
-        borderRadius: BorderRadius.circular(AppConstants.defaultBorderRadius),
-      ),
-      child: Padding(
-        padding: const EdgeInsets.all(AppSpacing.md),
-        child: Column(
-          crossAxisAlignment: CrossAxisAlignment.start,
-          children: [
-            Text(
-              'Time Period',
-              style: AppTextStyles.bodyText1.copyWith(
-                fontWeight: FontWeight.w600,
-              ),
-            ),
-            const SizedBox(height: AppSpacing.sm),
-            Container(
-              decoration: BoxDecoration(
-                border: Border.all(color: Colors.grey[300]!),
-                borderRadius:
-                    BorderRadius.circular(AppConstants.defaultBorderRadius),
-              ),
-              child: DropdownButtonFormField<String>(
-                value: _selectedPeriod,
-                decoration: const InputDecoration(
-                  border: InputBorder.none,
-                  contentPadding: EdgeInsets.symmetric(
-                    horizontal: AppSpacing.md,
-                    vertical: AppSpacing.sm,
-                  ),
-                ),
-                items: _periods.map((period) {
-                  return DropdownMenuItem<String>(
-                    value: period,
-                    child: Text(period),
-                  );
-                }).toList(),
-                onChanged: (value) {
-                  if (value != null) {
-                    setState(() => _selectedPeriod = value);
-                  }
-                },
-              ),
-            ),
-          ],
-        ),
+            );
+          }
+          return const Center(child: CircularProgressIndicator());
+        },
       ),
     );
   }
 
-  Widget _buildSummaryCards() {
-    final totalSpent = _getTotalSpent();
-    final totalBudget = _getTotalBudget();
+  void _showExportDialog(BuildContext context) {
+    final state = context.read<ReportsCubit>().state;
+    if (state is! ReportsLoaded) return;
+
+    showDialog(
+      context: context,
+      builder: (dialogContext) => ExportDialog(
+        onExport: (format, startDate, endDate) async {
+          final groups = state.filteredGroups.where((g) {
+            return !g.group.date.isBefore(startDate) &&
+                !g.group.date.isAfter(endDate);
+          }).toList();
+
+          try {
+            final exportService = ExportService();
+            if (format == 'CSV') {
+              final file = await exportService.exportToCSV(groups);
+              await exportService.shareFile(file);
+            } else {
+              final file = await exportService.exportToPDF(groups);
+              await exportService.shareFile(file);
+            }
+          } catch (e) {
+            if (context.mounted) {
+              ScaffoldMessenger.of(context).showSnackBar(
+                SnackBar(content: Text('Export failed: $e')),
+              );
+            }
+          }
+        },
+      ),
+    );
+  }
+
+  Widget _buildPeriodSelector(BuildContext context, ReportsLoaded state) {
+    return SingleChildScrollView(
+      scrollDirection: Axis.horizontal,
+      child: Row(
+        children: _periods.map((period) {
+          final isSelected = state.selectedPeriod == period;
+          return Padding(
+            padding: const EdgeInsets.only(right: AppSpacing.sm),
+            child: ChoiceChip(
+              label: Text(period),
+              selected: isSelected,
+              onSelected: (_) {
+                context.read<ReportsCubit>().changePeriod(period);
+              },
+              selectedColor: AppConstants.primaryColor,
+              labelStyle: TextStyle(
+                color: isSelected ? Colors.white : AppConstants.textSecondary,
+                fontWeight: isSelected ? FontWeight.w600 : FontWeight.w500,
+                fontSize: 13,
+              ),
+              backgroundColor: AppConstants.surfaceColor,
+              side: BorderSide(
+                color: isSelected
+                    ? AppConstants.primaryColor
+                    : AppConstants.borderColor,
+              ),
+              shape: RoundedRectangleBorder(
+                borderRadius: BorderRadius.circular(AppBorderRadius.md),
+              ),
+            ),
+          );
+        }).toList(),
+      ),
+    );
+  }
+
+  Widget _buildSummaryCards(ReportsLoaded state) {
+    final totalSpent = state.totalSpent;
+    final totalBudget = state.totalBudget;
     final remaining = totalBudget - totalSpent;
-    final averageSpending = _getAverageSpending();
-    final topCategory = _getTopCategory();
+    final averageSpending = state.averageSpending;
 
     return Column(
       crossAxisAlignment: CrossAxisAlignment.start,
       children: [
-        Text(
-          'Summary',
-          style: AppTextStyles.headline3,
-        ),
-        const SizedBox(height: AppSpacing.md),
+        Text('Summary', style: AppTextStyles.headline3),
+        const SizedBox(height: AppSpacing.sm),
         Row(
           children: [
             Expanded(
               child: _buildSummaryCard(
                 'Total Spent',
                 '${AppConstants.currencySymbol}${totalSpent.toStringAsFixed(2)}',
-                Icons.payments,
+                Icons.payments_rounded,
                 AppConstants.errorColor,
               ),
             ),
-            const SizedBox(width: AppSpacing.md),
+            const SizedBox(width: AppSpacing.sm),
             Expanded(
               child: _buildSummaryCard(
                 'Total Budget',
                 '${AppConstants.currencySymbol}${totalBudget.toStringAsFixed(2)}',
-                Icons.account_balance_wallet,
+                Icons.account_balance_wallet_rounded,
                 AppConstants.primaryColor,
               ),
             ),
           ],
         ),
-        const SizedBox(height: AppSpacing.md),
+        const SizedBox(height: AppSpacing.sm),
         Row(
           children: [
             Expanded(
               child: _buildSummaryCard(
                 'Remaining',
                 '${AppConstants.currencySymbol}${remaining.toStringAsFixed(2)}',
-                Icons.savings,
+                Icons.savings_rounded,
                 remaining >= 0
                     ? AppConstants.successColor
                     : AppConstants.warningColor,
               ),
             ),
-            const SizedBox(width: AppSpacing.md),
+            const SizedBox(width: AppSpacing.sm),
             Expanded(
               child: _buildSummaryCard(
                 'Avg. per Expense',
                 '${AppConstants.currencySymbol}${averageSpending.toStringAsFixed(2)}',
-                Icons.trending_up,
+                Icons.trending_up_rounded,
                 AppConstants.secondaryColor,
               ),
             ),
@@ -279,29 +209,28 @@ class _ReportsScreenState extends State<ReportsScreen> {
   Widget _buildSummaryCard(
       String title, String value, IconData icon, Color color) {
     return Card(
-      elevation: AppConstants.defaultElevation,
-      shape: RoundedRectangleBorder(
-        borderRadius: BorderRadius.circular(AppConstants.defaultBorderRadius),
-      ),
       child: Padding(
         padding: const EdgeInsets.all(AppSpacing.md),
         child: Column(
+          crossAxisAlignment: CrossAxisAlignment.start,
           children: [
-            Icon(icon, color: color, size: 24),
-            const SizedBox(height: AppSpacing.sm),
-            Text(
-              title,
-              style: AppTextStyles.caption.copyWith(color: Colors.grey[600]),
-              textAlign: TextAlign.center,
+            Container(
+              padding: const EdgeInsets.all(6),
+              decoration: BoxDecoration(
+                color: color.withOpacity(0.1),
+                borderRadius: BorderRadius.circular(AppBorderRadius.sm),
+              ),
+              child: Icon(icon, color: color, size: 18),
             ),
+            const SizedBox(height: AppSpacing.sm),
+            Text(title, style: AppTextStyles.caption),
             const SizedBox(height: AppSpacing.xs),
             Text(
               value,
               style: AppTextStyles.bodyText1.copyWith(
                 color: color,
-                fontWeight: FontWeight.bold,
+                fontWeight: FontWeight.w700,
               ),
-              textAlign: TextAlign.center,
             ),
           ],
         ),
@@ -309,18 +238,14 @@ class _ReportsScreenState extends State<ReportsScreen> {
     );
   }
 
-  Widget _buildQuickInsights() {
-    final totalSpent = _getTotalSpent();
-    final totalBudget = _getTotalBudget();
-    final topCategory = _getTopCategory();
-    final categorySpending = _getCategorySpending();
-    final expenseCount = _getFilteredExpenses().length;
+  Widget _buildQuickInsights(ReportsLoaded state) {
+    final totalSpent = state.totalSpent;
+    final totalBudget = state.totalBudget;
+    final topCategory = state.topCategory ?? 'No expenses';
+    final categorySpending = state.categorySpending;
+    final expenseCount = state.filteredGroups.length;
 
     return Card(
-      elevation: AppConstants.defaultElevation,
-      shape: RoundedRectangleBorder(
-        borderRadius: BorderRadius.circular(AppConstants.defaultBorderRadius),
-      ),
       child: Padding(
         padding: const EdgeInsets.all(AppSpacing.lg),
         child: Column(
@@ -328,35 +253,37 @@ class _ReportsScreenState extends State<ReportsScreen> {
           children: [
             Row(
               children: [
-                Icon(
-                  Icons.lightbulb,
-                  color: AppConstants.warningColor,
-                  size: 24,
+                Container(
+                  padding: const EdgeInsets.all(6),
+                  decoration: BoxDecoration(
+                    color: AppConstants.accentColor.withOpacity(0.1),
+                    borderRadius: BorderRadius.circular(AppBorderRadius.sm),
+                  ),
+                  child: Icon(Icons.lightbulb_rounded,
+                      color: AppConstants.accentColor, size: 18),
                 ),
                 const SizedBox(width: AppSpacing.sm),
-                Text(
-                  'Quick Insights',
-                  style: AppTextStyles.headline3,
-                ),
+                Text('Quick Insights', style: AppTextStyles.headline3),
               ],
             ),
             const SizedBox(height: AppSpacing.md),
             _buildInsightItem(
               'Total Expenses',
               '$expenseCount transactions',
-              Icons.receipt,
+              Icons.receipt_long_rounded,
             ),
             _buildInsightItem(
               'Top Category',
               topCategory,
-              AppConstants.categoryIcons[topCategory] ?? Icons.category,
+              AppConstants.categoryIcons[topCategory] ??
+                  Icons.category_rounded,
               color: AppConstants.categoryColors[topCategory],
             ),
             if (totalBudget > 0)
               _buildInsightItem(
                 'Budget Usage',
                 '${((totalSpent / totalBudget) * 100).toStringAsFixed(1)}%',
-                Icons.pie_chart,
+                Icons.pie_chart_rounded,
                 color: totalSpent > totalBudget
                     ? AppConstants.errorColor
                     : AppConstants.successColor,
@@ -365,7 +292,7 @@ class _ReportsScreenState extends State<ReportsScreen> {
               _buildInsightItem(
                 'Categories Used',
                 '${categorySpending.length} categories',
-                Icons.category,
+                Icons.category_rounded,
               ),
           ],
         ),
@@ -379,23 +306,20 @@ class _ReportsScreenState extends State<ReportsScreen> {
       padding: const EdgeInsets.only(bottom: AppSpacing.sm),
       child: Row(
         children: [
-          Icon(
-            icon,
-            color: color ?? Colors.grey[600],
-            size: 20,
-          ),
+          Icon(icon,
+              color: color ?? AppConstants.textTertiary, size: 18),
           const SizedBox(width: AppSpacing.sm),
           Expanded(
             child: Text(
               label,
-              style: AppTextStyles.bodyText2.copyWith(color: Colors.grey[600]),
+              style: AppTextStyles.bodyText2,
             ),
           ),
           Text(
             value,
             style: AppTextStyles.bodyText2.copyWith(
               fontWeight: FontWeight.w600,
-              color: color,
+              color: color ?? AppConstants.textPrimary,
             ),
           ),
         ],
@@ -403,35 +327,32 @@ class _ReportsScreenState extends State<ReportsScreen> {
     );
   }
 
-  Widget _buildReportCategories() {
+  Widget _buildReportCategories(BuildContext context) {
     return Column(
       crossAxisAlignment: CrossAxisAlignment.start,
       children: [
-        Text(
-          'Detailed Reports',
-          style: AppTextStyles.headline3,
-        ),
-        const SizedBox(height: AppSpacing.md),
+        Text('Detailed Reports', style: AppTextStyles.headline3),
+        const SizedBox(height: AppSpacing.sm),
         _buildReportCard(
           'Spending Analytics',
           'View spending trends and patterns over time',
-          Icons.trending_up,
+          Icons.trending_up_rounded,
           AppConstants.primaryColor,
           () => context.push('/spending-analytics'),
         ),
-        const SizedBox(height: AppSpacing.md),
+        const SizedBox(height: AppSpacing.sm),
         _buildReportCard(
           'Category Breakdown',
           'See how much you spend in each category',
-          Icons.pie_chart,
+          Icons.pie_chart_rounded,
           AppConstants.secondaryColor,
           () => context.push('/category-breakdown'),
         ),
-        const SizedBox(height: AppSpacing.md),
+        const SizedBox(height: AppSpacing.sm),
         _buildReportCard(
           'Budget Performance',
           'Compare your spending against your budgets',
-          Icons.assessment,
+          Icons.assessment_rounded,
           AppConstants.accentColor,
           () => context.push('/budget-performance'),
         ),
@@ -447,24 +368,20 @@ class _ReportsScreenState extends State<ReportsScreen> {
     VoidCallback onTap,
   ) {
     return Card(
-      elevation: AppConstants.defaultElevation,
-      shape: RoundedRectangleBorder(
-        borderRadius: BorderRadius.circular(AppConstants.defaultBorderRadius),
-      ),
       child: InkWell(
         onTap: onTap,
         borderRadius: BorderRadius.circular(AppConstants.defaultBorderRadius),
         child: Padding(
-          padding: const EdgeInsets.all(AppSpacing.lg),
+          padding: const EdgeInsets.all(AppSpacing.md),
           child: Row(
             children: [
               Container(
-                padding: const EdgeInsets.all(AppSpacing.md),
+                padding: const EdgeInsets.all(AppSpacing.sm + 2),
                 decoration: BoxDecoration(
                   color: color.withOpacity(0.1),
-                  borderRadius: BorderRadius.circular(AppBorderRadius.circular),
+                  borderRadius: BorderRadius.circular(AppBorderRadius.md),
                 ),
-                child: Icon(icon, color: color, size: 24),
+                child: Icon(icon, color: color, size: 22),
               ),
               const SizedBox(width: AppSpacing.md),
               Expanded(
@@ -477,21 +394,16 @@ class _ReportsScreenState extends State<ReportsScreen> {
                         fontWeight: FontWeight.w600,
                       ),
                     ),
-                    const SizedBox(height: AppSpacing.xs),
+                    const SizedBox(height: 2),
                     Text(
                       description,
-                      style: AppTextStyles.caption.copyWith(
-                        color: Colors.grey[600],
-                      ),
+                      style: AppTextStyles.caption,
                     ),
                   ],
                 ),
               ),
-              Icon(
-                Icons.arrow_forward_ios,
-                color: Colors.grey[400],
-                size: 16,
-              ),
+              Icon(Icons.chevron_right_rounded,
+                  color: AppConstants.textTertiary, size: 20),
             ],
           ),
         ),

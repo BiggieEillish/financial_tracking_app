@@ -5,6 +5,7 @@ import 'package:camera/camera.dart';
 import '../../../core/services/camera_service.dart';
 import '../../../core/services/ocr_service.dart';
 import '../../../core/services/pdf_service.dart';
+import '../../../core/services/image_processor.dart';
 import '../../../shared/constants/app_constants.dart';
 
 class ReceiptScannerScreen extends StatefulWidget {
@@ -19,6 +20,7 @@ class _ReceiptScannerScreenState extends State<ReceiptScannerScreen>
   final CameraService _cameraService = CameraService();
   final OCRService _ocrService = OCRService();
   final PDFService _pdfService = PDFService();
+  final ImageProcessor _imageProcessor = ImageProcessor();
 
   CameraController? _cameraController;
   bool _isInitialized = false;
@@ -172,9 +174,15 @@ class _ReceiptScannerScreenState extends State<ReceiptScannerScreen>
 
   Future<void> _processReceipt(XFile imageFile) async {
     try {
-      final file = await _cameraService.xFileToFile(imageFile);
+      var file = await _cameraService.xFileToFile(imageFile);
       if (file == null) {
         throw Exception('Failed to convert image file');
+      }
+
+      // Crop/rotate step
+      final cropped = await _imageProcessor.cropAndRotateImage(file);
+      if (cropped != null) {
+        file = cropped;
       }
 
       final result = await _ocrService.scanReceipt(file);

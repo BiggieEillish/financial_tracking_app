@@ -1,9 +1,9 @@
 import 'dart:io';
 import 'dart:typed_data';
 import 'package:google_mlkit_text_recognition/google_mlkit_text_recognition.dart';
-import 'package:image/image.dart' as img;
 import 'package:path_provider/path_provider.dart';
 import 'package:path/path.dart' as path;
+import 'receipt_parser.dart';
 
 class ReceiptItem {
   final String name;
@@ -40,12 +40,27 @@ class ReceiptScanResult {
   });
 }
 
+class _TextLineInfo {
+  final String text;
+  final double top;
+  final double left;
+  final double height;
+
+  _TextLineInfo({
+    required this.text,
+    this.top = 0,
+    this.left = 0,
+    this.height = 20,
+  });
+}
+
 class OCRService {
   static final OCRService _instance = OCRService._internal();
   factory OCRService() => _instance;
   OCRService._internal();
 
   final TextRecognizer _textRecognizer = TextRecognizer();
+  final ReceiptParser _receiptParser = ReceiptParser();
 
   Future<ReceiptScanResult> scanReceipt(File imageFile) async {
     try {
@@ -56,16 +71,31 @@ class OCRService {
       final RecognizedText recognizedText =
           await _textRecognizer.processImage(inputImage);
 
-      // Extract text blocks
-      final List<String> textBlocks = [];
+      // Collect all text lines with their bounding box positions
+      final List<_TextLineInfo> allLines = [];
       for (TextBlock block in recognizedText.blocks) {
         for (TextLine line in block.lines) {
-          textBlocks.add(line.text);
+          allLines.add(_TextLineInfo(
+            text: line.text,
+            top: line.boundingBox.top,
+            left: line.boundingBox.left,
+            height: line.boundingBox.height,
+          ));
         }
       }
 
-      // Parse receipt data
-      final result = _parseReceiptText(textBlocks);
+      // Merge text lines at the same vertical position into full lines
+      final List<String> textLines = _reconstructLines(allLines);
+
+      // Debug output
+      print('=== OCR Recognized ${textLines.length} lines ===');
+      for (final line in textLines) {
+        print('OCR: "$line"');
+      }
+      print('=== End OCR Output ===');
+
+      // Parse receipt data using strategy-based parser
+      final result = _receiptParser.parse(textLines);
 
       // Save image to local storage
       final savedImagePath = await _saveImageToLocal(imageFile);
@@ -83,6 +113,41 @@ class OCRService {
     }
   }
 
+  /// Merges TextLines at the same vertical position into single lines.
+  /// Handles OCR engines that split item names and prices into separate
+  /// text regions even though they appear on the same visual line.
+  List<String> _reconstructLines(List<_TextLineInfo> lines) {
+    if (lines.isEmpty) return [];
+
+    // Sort by vertical position
+    lines.sort((a, b) => a.top.compareTo(b.top));
+
+    // Group lines that are at approximately the same Y position
+    final List<List<_TextLineInfo>> rows = [];
+    List<_TextLineInfo> currentRow = [lines.first];
+
+    for (int i = 1; i < lines.length; i++) {
+      final rowTop = currentRow.first.top;
+      final currTop = lines[i].top;
+      final rowHeight = currentRow.first.height;
+
+      // If within 60% of line height, consider same row
+      if ((currTop - rowTop).abs() < rowHeight * 0.6) {
+        currentRow.add(lines[i]);
+      } else {
+        rows.add(currentRow);
+        currentRow = [lines[i]];
+      }
+    }
+    rows.add(currentRow);
+
+    // For each row, sort left-to-right and concatenate
+    return rows.map((row) {
+      row.sort((a, b) => a.left.compareTo(b.left));
+      return row.map((l) => l.text).join(' ');
+    }).toList();
+  }
+
   Future<ReceiptScanResult> scanReceiptFromBytes(Uint8List imageBytes) async {
     try {
       // Create temporary file
@@ -95,107 +160,6 @@ class OCRService {
       print('Error scanning receipt from bytes: $e');
       rethrow;
     }
-  }
-
-  ReceiptScanResult _parseReceiptText(List<String> textBlocks) {
-    final List<ReceiptItem> items = [];
-    double totalAmount = 0.0;
-    String? storeName;
-    DateTime? date;
-
-    // Regular expressions for parsing
-    final pricePattern = RegExp(r'RM?\s*\d+\.\d{2}|\d+\.\d{2}');
-    final datePattern = RegExp(r'\d{1,2}[/-]\d{1,2}[/-]\d{2,4}');
-    final quantityPattern = RegExp(r'^\d+\s+');
-
-    for (String line in textBlocks) {
-      line = line.trim();
-      if (line.isEmpty) continue;
-
-      // Try to extract store name (usually at the top)
-      if (storeName == null &&
-          line.length > 3 &&
-          !pricePattern.hasMatch(line)) {
-        storeName = line;
-        continue;
-      }
-
-      // Try to extract date
-      if (date == null && datePattern.hasMatch(line)) {
-        try {
-          final dateMatch = datePattern.firstMatch(line);
-          if (dateMatch != null) {
-            final dateStr = dateMatch.group(0)!;
-            // Simple date parsing - you might want to improve this
-            final parts = dateStr.split(RegExp(r'[/-]'));
-            if (parts.length == 3) {
-              final month = int.parse(parts[0]);
-              final day = int.parse(parts[1]);
-              final year = int.parse(parts[2]);
-              date = DateTime(year < 100 ? 2000 + year : year, month, day);
-            }
-          }
-        } catch (e) {
-          print('Error parsing date: $e');
-        }
-        continue;
-      }
-
-      // Try to extract items with prices
-      final priceMatches = pricePattern.allMatches(line);
-      if (priceMatches.isNotEmpty) {
-        final lastPriceMatch = priceMatches.last;
-        final priceStr =
-            lastPriceMatch.group(0)!.replaceAll(RegExp(r'RM?\s*'), '');
-        final price = double.tryParse(priceStr);
-
-        if (price != null) {
-          // Extract item name (everything before the price)
-          String itemName = line.substring(0, lastPriceMatch.start).trim();
-
-          // Remove quantity if present
-          final quantityMatch = quantityPattern.firstMatch(itemName);
-          int quantity = 1;
-          if (quantityMatch != null) {
-            quantity = int.tryParse(quantityMatch.group(0)!.trim()) ?? 1;
-            itemName = itemName.substring(quantityMatch.end).trim();
-          }
-
-          // Clean up item name (remove RM and other currency symbols)
-          itemName = itemName.replaceAll(RegExp(r'[^\w\s]'), '').trim();
-
-          if (itemName.isNotEmpty && price > 0) {
-            // Check if this might be a total
-            final lowerName = itemName.toLowerCase();
-            if (lowerName.contains('total') ||
-                lowerName.contains('subtotal') ||
-                lowerName.contains('tax') ||
-                lowerName.contains('amount')) {
-              totalAmount = price;
-            } else {
-              items.add(ReceiptItem(
-                name: itemName,
-                price: price,
-                quantity: quantity,
-              ));
-            }
-          }
-        }
-      }
-    }
-
-    // If no total was found, sum up all items
-    if (totalAmount == 0.0 && items.isNotEmpty) {
-      totalAmount =
-          items.fold(0.0, (sum, item) => sum + (item.price * item.quantity));
-    }
-
-    return ReceiptScanResult(
-      items: items,
-      totalAmount: totalAmount,
-      storeName: storeName,
-      date: date,
-    );
   }
 
   Future<String> _saveImageToLocal(File imageFile) async {

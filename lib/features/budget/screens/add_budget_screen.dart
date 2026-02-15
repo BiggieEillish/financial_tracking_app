@@ -1,8 +1,10 @@
 import 'package:flutter/material.dart';
+import 'package:flutter_bloc/flutter_bloc.dart';
 import 'package:go_router/go_router.dart';
 import '../../../shared/constants/app_constants.dart';
-import '../../../core/database/database_service.dart';
-import '../../../core/database/database.dart';
+import '../bloc/budget_form_cubit.dart';
+import '../bloc/budget_form_state.dart';
+import '../bloc/budget_list_cubit.dart';
 
 class AddBudgetScreen extends StatefulWidget {
   const AddBudgetScreen({super.key});
@@ -14,13 +16,11 @@ class AddBudgetScreen extends StatefulWidget {
 class _AddBudgetScreenState extends State<AddBudgetScreen> {
   final _formKey = GlobalKey<FormState>();
   final _amountController = TextEditingController();
-  final DatabaseService _databaseService = DatabaseService();
 
   String _selectedCategory = AppConstants.expenseCategories.first;
   String _selectedPeriod = AppConstants.budgetPeriods.first;
   DateTime _periodStart = DateTime.now();
   DateTime _periodEnd = DateTime.now().add(const Duration(days: 30));
-  bool _isLoading = false;
 
   @override
   void initState() {
@@ -76,79 +76,77 @@ class _AddBudgetScreenState extends State<AddBudgetScreen> {
   Future<void> _saveBudget() async {
     if (!_formKey.currentState!.validate()) return;
 
-    setState(() => _isLoading = true);
+    final amount = double.parse(_amountController.text);
 
-    try {
-      final amount = double.parse(_amountController.text);
-
-      final budget = BudgetsCompanion.insert(
-        id: DateTime.now().millisecondsSinceEpoch.toString(),
-        userId: 'default_user', // TODO: Get from auth service
-        category: _selectedCategory,
-        limit: amount,
-        periodStart: _periodStart,
-        periodEnd: _periodEnd,
-      );
-
-      await _databaseService.database.insertBudget(budget);
-
-      if (mounted) {
-        ScaffoldMessenger.of(context).showSnackBar(
-          const SnackBar(
-            content: Text('Budget created successfully!'),
-            backgroundColor: AppConstants.successColor,
-          ),
+    await context.read<BudgetFormCubit>().addBudget(
+          category: _selectedCategory,
+          limit: amount,
+          periodStart: _periodStart,
+          periodEnd: _periodEnd,
         );
-        context.pop(true);
-      }
-    } catch (e) {
-      if (mounted) {
-        ScaffoldMessenger.of(context).showSnackBar(
-          SnackBar(
-            content: Text('Error creating budget: $e'),
-            backgroundColor: AppConstants.errorColor,
-          ),
-        );
-      }
-    } finally {
-      setState(() => _isLoading = false);
-    }
   }
 
   @override
   Widget build(BuildContext context) {
-    return Scaffold(
-      appBar: AppBar(
-        title: const Text('Add Budget'),
-        actions: [
-          if (_isLoading)
-            const Padding(
-              padding: EdgeInsets.all(16.0),
-              child: SizedBox(
-                width: 20,
-                height: 20,
-                child: CircularProgressIndicator(strokeWidth: 2),
-              ),
+    return BlocListener<BudgetFormCubit, BudgetFormState>(
+      listener: (context, state) {
+        if (state is BudgetFormSuccess) {
+          context.read<BudgetListCubit>().loadBudgets();
+          ScaffoldMessenger.of(context).showSnackBar(
+            const SnackBar(
+              content: Text('Budget created successfully!'),
+              backgroundColor: AppConstants.successColor,
             ),
-        ],
-      ),
-      body: Form(
-        key: _formKey,
-        child: SingleChildScrollView(
-          padding: const EdgeInsets.all(AppConstants.defaultPadding),
-          child: Column(
-            crossAxisAlignment: CrossAxisAlignment.start,
-            children: [
-              _buildCategorySelector(),
-              const SizedBox(height: AppSpacing.lg),
-              _buildAmountField(),
-              const SizedBox(height: AppSpacing.lg),
-              _buildPeriodSelector(),
-              const SizedBox(height: AppSpacing.lg),
-              _buildDateSelectors(),
-              const SizedBox(height: AppSpacing.xl),
-              _buildSaveButton(),
-            ],
+          );
+          context.pop(true);
+        } else if (state is BudgetFormError) {
+          ScaffoldMessenger.of(context).showSnackBar(
+            SnackBar(
+              content: Text(state.message),
+              backgroundColor: AppConstants.errorColor,
+            ),
+          );
+        }
+      },
+      child: Scaffold(
+        appBar: AppBar(
+          title: const Text('Add Budget'),
+          actions: [
+            BlocBuilder<BudgetFormCubit, BudgetFormState>(
+              builder: (context, state) {
+                if (state is BudgetFormSubmitting) {
+                  return const Padding(
+                    padding: EdgeInsets.all(16.0),
+                    child: SizedBox(
+                      width: 20,
+                      height: 20,
+                      child: CircularProgressIndicator(strokeWidth: 2),
+                    ),
+                  );
+                }
+                return const SizedBox.shrink();
+              },
+            ),
+          ],
+        ),
+        body: Form(
+          key: _formKey,
+          child: SingleChildScrollView(
+            padding: const EdgeInsets.all(AppConstants.defaultPadding),
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                _buildCategorySelector(),
+                const SizedBox(height: AppSpacing.lg),
+                _buildAmountField(),
+                const SizedBox(height: AppSpacing.lg),
+                _buildPeriodSelector(),
+                const SizedBox(height: AppSpacing.lg),
+                _buildDateSelectors(),
+                const SizedBox(height: AppSpacing.xl),
+                _buildSaveButton(),
+              ],
+            ),
           ),
         ),
       ),
@@ -159,12 +157,9 @@ class _AddBudgetScreenState extends State<AddBudgetScreen> {
     return Column(
       crossAxisAlignment: CrossAxisAlignment.start,
       children: [
-        Text(
-          'Category',
-          style: AppTextStyles.bodyText1.copyWith(
-            fontWeight: FontWeight.w600,
-          ),
-        ),
+        Text('Category',
+            style:
+                AppTextStyles.bodyText1.copyWith(fontWeight: FontWeight.w600)),
         const SizedBox(height: AppSpacing.sm),
         Container(
           decoration: BoxDecoration(
@@ -218,12 +213,9 @@ class _AddBudgetScreenState extends State<AddBudgetScreen> {
     return Column(
       crossAxisAlignment: CrossAxisAlignment.start,
       children: [
-        Text(
-          'Budget Amount',
-          style: AppTextStyles.bodyText1.copyWith(
-            fontWeight: FontWeight.w600,
-          ),
-        ),
+        Text('Budget Amount',
+            style:
+                AppTextStyles.bodyText1.copyWith(fontWeight: FontWeight.w600)),
         const SizedBox(height: AppSpacing.sm),
         TextFormField(
           controller: _amountController,
@@ -255,12 +247,9 @@ class _AddBudgetScreenState extends State<AddBudgetScreen> {
     return Column(
       crossAxisAlignment: CrossAxisAlignment.start,
       children: [
-        Text(
-          'Budget Period',
-          style: AppTextStyles.bodyText1.copyWith(
-            fontWeight: FontWeight.w600,
-          ),
-        ),
+        Text('Budget Period',
+            style:
+                AppTextStyles.bodyText1.copyWith(fontWeight: FontWeight.w600)),
         const SizedBox(height: AppSpacing.sm),
         Container(
           decoration: BoxDecoration(
@@ -278,10 +267,7 @@ class _AddBudgetScreenState extends State<AddBudgetScreen> {
               ),
             ),
             items: AppConstants.budgetPeriods.map((period) {
-              return DropdownMenuItem<String>(
-                value: period,
-                child: Text(period),
-              );
+              return DropdownMenuItem<String>(value: period, child: Text(period));
             }).toList(),
             onChanged: (value) {
               if (value != null) {
@@ -301,12 +287,9 @@ class _AddBudgetScreenState extends State<AddBudgetScreen> {
     return Column(
       crossAxisAlignment: CrossAxisAlignment.start,
       children: [
-        Text(
-          'Period Dates',
-          style: AppTextStyles.bodyText1.copyWith(
-            fontWeight: FontWeight.w600,
-          ),
-        ),
+        Text('Period Dates',
+            style:
+                AppTextStyles.bodyText1.copyWith(fontWeight: FontWeight.w600)),
         const SizedBox(height: AppSpacing.sm),
         Row(
           children: [
@@ -314,7 +297,7 @@ class _AddBudgetScreenState extends State<AddBudgetScreen> {
               child: _buildDateField(
                 'Start Date',
                 _periodStart,
-                (date) => _selectDate(context, true),
+                () => _selectDate(context, true),
               ),
             ),
             const SizedBox(width: AppSpacing.md),
@@ -322,7 +305,7 @@ class _AddBudgetScreenState extends State<AddBudgetScreen> {
               child: _buildDateField(
                 'End Date',
                 _periodEnd,
-                (date) => _selectDate(context, false),
+                () => _selectDate(context, false),
               ),
             ),
           ],
@@ -331,19 +314,17 @@ class _AddBudgetScreenState extends State<AddBudgetScreen> {
     );
   }
 
-  Widget _buildDateField(
-      String label, DateTime date, Function(DateTime) onTap) {
+  Widget _buildDateField(String label, DateTime date, VoidCallback onTap) {
     return Column(
       crossAxisAlignment: CrossAxisAlignment.start,
       children: [
-        Text(
-          label,
-          style: AppTextStyles.caption.copyWith(color: Colors.grey[600]),
-        ),
+        Text(label,
+            style: AppTextStyles.caption.copyWith(color: Colors.grey[600])),
         const SizedBox(height: AppSpacing.xs),
         InkWell(
-          onTap: () => onTap(date),
-          borderRadius: BorderRadius.circular(AppConstants.defaultBorderRadius),
+          onTap: onTap,
+          borderRadius:
+              BorderRadius.circular(AppConstants.defaultBorderRadius),
           child: Container(
             padding: const EdgeInsets.symmetric(
               horizontal: AppSpacing.md,
@@ -373,24 +354,30 @@ class _AddBudgetScreenState extends State<AddBudgetScreen> {
   }
 
   Widget _buildSaveButton() {
-    return SizedBox(
-      width: double.infinity,
-      child: ElevatedButton(
-        onPressed: _isLoading ? null : _saveBudget,
-        style: ElevatedButton.styleFrom(
-          padding: const EdgeInsets.symmetric(vertical: AppSpacing.md),
-        ),
-        child: _isLoading
-            ? const SizedBox(
-                width: 20,
-                height: 20,
-                child: CircularProgressIndicator(
-                  strokeWidth: 2,
-                  valueColor: AlwaysStoppedAnimation<Color>(Colors.white),
-                ),
-              )
-            : const Text('Create Budget'),
-      ),
+    return BlocBuilder<BudgetFormCubit, BudgetFormState>(
+      builder: (context, state) {
+        final isLoading = state is BudgetFormSubmitting;
+        return SizedBox(
+          width: double.infinity,
+          child: ElevatedButton(
+            onPressed: isLoading ? null : _saveBudget,
+            style: ElevatedButton.styleFrom(
+              padding: const EdgeInsets.symmetric(vertical: AppSpacing.md),
+            ),
+            child: isLoading
+                ? const SizedBox(
+                    width: 20,
+                    height: 20,
+                    child: CircularProgressIndicator(
+                      strokeWidth: 2,
+                      valueColor:
+                          AlwaysStoppedAnimation<Color>(Colors.white),
+                    ),
+                  )
+                : const Text('Create Budget'),
+          ),
+        );
+      },
     );
   }
 }
